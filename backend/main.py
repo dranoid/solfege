@@ -56,6 +56,18 @@ def index():
     return PlainTextResponse("Solfège OMR backend. POST an image to /transcribe.")
 
 
+# The frontend's split-out assets (loaded by solfege-player.html as siblings).
+# Served explicitly by name so we don't expose the whole project directory.
+@app.get("/player.js")
+def player_js():
+    return FileResponse(FRONTEND.parent / "player.js", media_type="application/javascript")
+
+
+@app.get("/player.css")
+def player_css():
+    return FileResponse(FRONTEND.parent / "player.css", media_type="text/css")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "engine": engine_name()}
