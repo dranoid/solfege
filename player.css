@@ -45,6 +45,8 @@
   .transport button{font-family:"JetBrains Mono",monospace;font-size:16px;background:var(--paper);border:1px solid var(--line2);border-radius:6px;width:42px;height:36px;cursor:pointer;color:var(--ink);transition:all .1s}
   .transport button:hover{border-color:var(--accent);color:var(--accent)}
   .transport .pos{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--muted-text);margin-left:4px;min-width:64px}
+  .transport .scope{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--paper);background:var(--accent2);padding:3px 9px;border-radius:5px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+  .transport .scope:empty{display:none}
   #tplay{font-size:18px}
   .scrub{width:100%;accent-color:var(--accent2);margin:0 0 12px;cursor:pointer;display:block}
   .exportall{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
@@ -62,6 +64,9 @@
   .vbtns{display:flex;gap:6px}
   .vbtns button{font-family:"JetBrains Mono",monospace;font-size:10px;border:1px solid var(--line2);background:var(--paper);border-radius:5px;padding:3px 10px;cursor:pointer;color:var(--muted-text);text-transform:uppercase;letter-spacing:0.06em}
   .vbtns button.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}
+  .vplay{display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;background:var(--paper);border:1px solid var(--line2);border-radius:5px;cursor:pointer;color:var(--accent2);font-size:12px;flex:none}
+  .vplay:hover{border-color:var(--accent2)}
+  .vplay.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}
   .stave-row{display:flex;flex-wrap:wrap;gap:6px}
   .note{min-width:54px;text-align:center;padding:8px 6px 10px;border-radius:8px;border:1px solid transparent;background:var(--paper);transition:all .15s}
   .note.rest{opacity:0.45}
@@ -91,6 +96,7 @@
   .voice.collapsed .voicebox{display:none}
   /* master solfa/sheet switch + bulk exports row */
   .viewmode{display:flex;align-items:center;gap:18px 24px;flex-wrap:wrap;justify-content:space-between;margin-bottom:14px}
+  .vm-switches{display:flex;align-items:center;gap:14px 22px;flex-wrap:wrap}
   .vm-switch{display:flex;align-items:center;gap:10px}
   .vm-label{font-family:"Fraunces",serif;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.08em;color:var(--accent)}
   /* per-part view toggle sits left, actions push right */
@@ -123,6 +129,12 @@
   .editparts .epart{padding:11px 0;border-top:1px dashed var(--line2)}
   .editparts .epart:first-child{border-top:none;padding-top:0}
   .epart-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .ecaret{display:inline-flex;align-items:center;background:none;border:none;cursor:pointer;color:var(--accent2);padding:0;line-height:1}
+  .ecaret .ic{vertical-align:0}
+  .epart.collapsed .epart-head{margin-bottom:0}
+  .epart-play{display:inline-flex;align-items:center;justify-content:center;width:30px;height:26px;background:var(--paper);border:1px solid var(--line2);border-radius:6px;cursor:pointer;color:var(--accent2);font-size:13px}
+  .epart-play:hover{border-color:var(--accent2)}
+  .epart-play.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}
   .epart-head input{font-family:"Fraunces",serif;font-weight:600;font-size:15px;color:var(--accent2);background:var(--paper);border:1px solid var(--line2);border-radius:6px;padding:5px 9px;width:150px}
   .epart-count{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted-text)}
   .epart-count.suspect{color:var(--accent);font-weight:600}
@@ -135,6 +147,8 @@
   .echip:hover{border-color:var(--accent2)}
   .echip.sel{background:var(--accent2);border-color:var(--accent2)}
   .echip.sel .solf,.echip.sel .nm,.echip.sel .dur{color:var(--paper)}
+  /* the chip currently sounding during playback (distinct from selection: a ring + lift) */
+  .echip.eplaying{box-shadow:0 0 0 2px var(--accent2);transform:translateY(-2px)}
   .echip.rest{opacity:0.5}
   .echip .dur{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--accent);display:block;margin-top:3px}
   .echip.addchip{display:flex;align-items:center;justify-content:center;min-width:42px;color:var(--muted-text);font-size:20px;border-style:dashed}
@@ -147,5 +161,9 @@
   .edprevhead{display:flex;align-items:baseline;gap:10px;margin-top:6px;margin-bottom:2px}
   #editsheet svg{cursor:pointer}
   #editsheet .ednote-sel, #editsheet .ednote-sel *{fill:var(--accent2)!important;stroke:var(--accent2)!important}
+  /* the note(s) currently sounding, lit on the engraved staff like the solfa cells */
+  .sheetnote.playing, .sheetnote.playing *{fill:var(--accent2)!important;stroke:var(--accent2)!important}
+  /* noteheads on the player staves + full score are click-to-seek */
+  #stave .sheetnote, #sheet .sheetnote{cursor:pointer}
   .draglabel{position:fixed;z-index:80;background:var(--accent2);color:var(--paper);font-family:"JetBrains Mono",monospace;font-size:12px;padding:3px 8px;border-radius:5px;pointer-events:none;transform:translate(12px,-28px)}
   .draglabel[hidden]{display:none}

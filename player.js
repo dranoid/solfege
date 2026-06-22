@@ -19,10 +19,10 @@ function icon(name){
 const PC = {C:0,D:2,E:4,F:5,G:7,A:9,B:11};
 const LETTERS = ["C","D","E","F","G","A","B"];
 const MAJOR = [0,2,4,5,7,9,11];                       // semitone offset of each major-scale degree
-const BASE  = ["Do","Re","Mi","Fa","Sol","La","Ti"];  // diatonic syllables by degree (0=do)
+const BASE  = ["Do","Re","Mi","Fa","So","La","Ti"];   // diatonic syllables by degree (0=do); "So" (not "Sol")
 const RAISED  = {0:"Di",1:"Ri",3:"Fi",4:"Si",5:"Li"}; // chromatic raised, by degree
 const LOWERED = {1:"Ra",2:"Me",4:"Se",5:"Le",6:"Te"}; // chromatic lowered, by degree
-const CHROM = ["Do","Di","Re","Ri","Mi","Fa","Fi","Sol","Si","La","Li","Ti"]; // enharmonic fallback
+const CHROM = ["Do","Di","Re","Ri","Mi","Fa","Fi","So","Si","La","Li","Ti"];  // enharmonic fallback
 // [display name, pitch class, tonic letter] - letter matters for correct solfège spelling
 const KEYS = [["C",0,"C"],["Db",1,"D"],["D",2,"D"],["Eb",3,"E"],["E",4,"E"],["F",5,"F"],
   ["F#",6,"F"],["G",7,"G"],["Ab",8,"A"],["A",9,"A"],["Bb",10,"B"],["B",11,"B"]];
@@ -112,6 +112,7 @@ function buildManual(){
   tracks = [{id:'t0', label:'Melody', enabled:true, solo:false, notes}];
   soloActive = false;
   render();
+  syncEditorView();
   contentChanged();
 }
 
@@ -223,7 +224,7 @@ function loadMusicXMLText(txt, msgEl){
     const tempo = readTempo(doc); const setT = tempo ? setTempo(tempo) : null;
     const built = parseParts(doc);
     if(!built.length) throw new Error('no notes found');
-    tracks = built; soloActive = false; render(); contentChanged();
+    tracks = built; soloActive = false; render(); syncEditorView(); contentChanged();
     const total = built.reduce((s,t)=> s + t.notes.filter(n=>!n.isRest).length, 0);
     if(msgEl) msgEl.textContent = `Loaded ${built.length} voice(s), ${total} notes${setT ? `, tempo ${setT} bpm` : ''}.`;
     return true;
@@ -261,7 +262,7 @@ function loadMidi(buf, msgEl){
     setKey(((pc%12)+12)%12, ks.key[0]);
   }
   if(midi.header.tempos && midi.header.tempos[0] && midi.header.tempos[0].bpm) setTempo(midi.header.tempos[0].bpm);
-  tracks = labelTracks(out); soloActive = false; render(); contentChanged();
+  tracks = labelTracks(out); soloActive = false; render(); syncEditorView(); contentChanged();
   if(msgEl) msgEl.textContent = `Loaded ${out.length} track(s) from MIDI. (MIDI carries no sharp/flat spelling, so solfège uses sharps; load MusicXML for exact spelling.)`;
 }
 
@@ -316,6 +317,9 @@ function render(){
     caret.innerHTML = icon(t.collapsed ? 'chevron-right' : 'chevron-down');
     caret.title = t.collapsed ? 'Show this part' : 'Hide this part';
     caret.onclick = ()=>{ t.collapsed = !t.collapsed; render(); };
+    const vplay = document.createElement('button'); vplay.className = 'vplay partplay'; vplay.dataset.tid = t.id;
+    vplay.innerHTML = icon('play'); vplay.title = 'Play this part';
+    vplay.onclick = ()=> togglePartPlay(t);
     const lab = document.createElement('span'); lab.className = 'vlabel'; lab.textContent = t.label;
     // per-part Solfa / Sheet toggle - Sheet needs engravable MusicXML for this voice
     const tog = document.createElement('div'); tog.className = 'vbtns';
@@ -341,13 +345,17 @@ function render(){
     const png = document.createElement('button'); png.innerHTML=icon('download')+'PNG'; png.title='Download this part’s solfège as an image';
     png.onclick = ()=> exportTrackPng(t);
     btns.append(vol, mp3, png);
-    head.append(caret, lab, tog, btns);
+    head.append(caret, vplay, lab, tog, btns);
     row.append(head);
     if(t.view === 'sheet' && canSheet(t)){
       // engraved staff for this one part, themed to the page; cached SVG so solo/mute don't re-render OSMD
       const box = document.createElement('div'); box.className = 'voicebox';
       if(t._sheetHTML && t._sheetKey === transposeOffset){ box.innerHTML = t._sheetHTML; }
-      else { box.innerHTML = '<p class="hint" style="margin:4px">Rendering staff…</p>'; renderPartSheet(t, box); }
+      // OSMD can't measure a hidden (display:none) container, so it would cache a
+      // blank staff. Only render while the player view is on screen; switchTab
+      // re-renders these when you come back to it.
+      else if(playerVisible()){ box.innerHTML = '<p class="hint" style="margin:4px">Rendering staff…</p>'; renderPartSheet(t, box); }
+      else { box.innerHTML = '<p class="hint" style="margin:4px">Staff updates when you open the Player tab.</p>'; }
       row.append(box);
     } else {
       const cells = document.createElement('div'); cells.className = 'stave-row';
@@ -365,12 +373,25 @@ function render(){
     }
     stave.append(row);
   });
+  updateMasterView();
+  updatePlayScope();   // reflect solo/mute/audition in the transport scope label
+  repaintPlayhead();   // keep the paused/playing note lit across re-renders (e.g. solfa<->sheet)
+}
+
+// Keep the master "Show all parts as" switch honest: highlight Solfa or Sheet
+// only when every part is on that view, neither when parts are mixed.
+function updateMasterView(){
+  const btns = document.querySelectorAll('#masterview button'); if(!btns.length) return;
+  const allSheet = tracks.length > 0 && tracks.every(t=> t.view === 'sheet');
+  const allSolfa = tracks.length > 0 && tracks.every(t=> (t.view || 'solfa') !== 'sheet');
+  btns.forEach(b=> b.classList.toggle('on', (b.dataset.m === 'sheet' && allSheet) || (b.dataset.m === 'solfa' && allSolfa)));
 }
 
 // Transpose every note (and the key) by `delta` semitones, re-spelling in the new
 // key so solfège is unchanged but the pitches now match (e.g. G -> A is +2).
 function transposeBy(delta){
-  if(!tracks.length) return;
+  if(!tracks.length || !delta) return;
+  pushUndo();   // transpose is undoable (snapshot taken before pitches are re-spelled)
   const oldTonic = {pc: currentTonic.pc, letter: currentTonic.letter};
   const newPc = ((oldTonic.pc + delta) % 12 + 12) % 12;
   const newLetter = KEY_LETTER[newPc] || oldTonic.letter;
@@ -388,6 +409,7 @@ function transposeBy(delta){
   transposeOffset += delta;
   render();
   retransposeSheets();
+  syncEditorView();
   dirty = true; computeEndBeat(); if(isPlaying) buildPart();
 }
 
@@ -462,11 +484,15 @@ function applyVowel(){
    Playback runs on Tone.Transport so we get real play/pause/seek. `bs` is
    seconds-per-beat at the current tempo; positions are tracked in beats. */
 let part=null, isPlaying=false, dirty=true, bs=0.5, endBeat=0, rafId=0, isScrubbing=false;
+// When set, playback is scoped to these tracks (per-part "play" buttons in the
+// editor). Null means the normal solo/mute scope. Exports are unaffected.
+let auditionTracks=null;
+function activeTracks(){ return auditionTracks || tracks.filter(t=> soloActive ? t.solo : t.enabled); }
 
 function releaseAllInst(){ if(ready) synth.releaseAll(); if(choirReady) sampler.releaseAll(); }
 
 function computeEndBeat(){
-  const active = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  const active = activeTracks();
   endBeat = 0;
   active.forEach(t=> t.notes.forEach(n=> endBeat = Math.max(endBeat, n.startBeat + n.durBeat)));
 }
@@ -474,7 +500,7 @@ function computeEndBeat(){
 function buildPart(){
   if(part){ part.dispose(); part=null; }
   bs = 60 / parseInt(document.getElementById('bpm').value);
-  const active = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  const active = activeTracks();
   const events = []; endBeat = 0;
   active.forEach(t=> t.notes.forEach(n=>{
     endBeat = Math.max(endBeat, n.startBeat + n.durBeat);
@@ -492,18 +518,33 @@ function trackById(id){ return tracks.find(t=> t.id === id); }
 
 // Distinct onset beats across the audible voices - the grid that step ⏮/⏭ moves on.
 function onsets(){
-  const active = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  const active = activeTracks();
   const s = new Set();
   active.forEach(t=> t.notes.forEach(n=> s.add(Math.round(n.startBeat*1e4)/1e4)));
   return [...s].sort((a,b)=>a-b);
 }
 
 function paintHighlights(beat){
-  const on = new Set(tracks.filter(t=> soloActive ? t.solo : t.enabled).map(t=>t.id));
+  const on = new Set(activeTracks().map(t=>t.id));
+  // solfa cells (player) and editor chips (one element each per note)
   tracks.forEach(t=> t.notes.forEach((n,i)=>{
-    const el = document.getElementById(t.id+'-'+i); if(!el) return;
-    el.classList.toggle('active', on.has(t.id) && beat >= n.startBeat-1e-6 && beat < n.startBeat+n.durBeat-1e-6);
+    const lit = on.has(t.id) && beat >= n.startBeat-1e-6 && beat < n.startBeat+n.durBeat-1e-6;
+    const el = document.getElementById(t.id+'-'+i); if(el) el.classList.toggle('active', lit);
+    const ec = document.getElementById('ec-'+t.id+'-'+i); if(ec) ec.classList.toggle('eplaying', lit);
   }));
+  // engraved noteheads (per-part sheets + full score), tagged with their beat window
+  document.querySelectorAll('.sheetnote').forEach(el=>{
+    const tid = el.dataset.tid;                       // per-part sheets carry a track id; full score does not
+    const audible = !tid || on.has(tid);
+    const b0 = parseFloat(el.dataset.b0), b1 = parseFloat(el.dataset.b1);
+    el.classList.toggle('playing', audible && beat >= b0-1e-6 && beat < b1-1e-6);
+  });
+}
+// Re-apply the highlight at the current playhead after a re-render (view toggle,
+// solo/mute), so the lit note survives switching a part between solfa and sheet
+// while playing or paused. At rest (stopped at 0) nothing is forced on.
+function repaintPlayhead(){
+  if(isPlaying || (window.Tone && Tone.Transport.seconds > 1e-6)) paintHighlights(Tone.Transport.seconds / bs);
 }
 function updatePos(beat){
   const el=document.getElementById('posdisp'); if(el) el.textContent = 'beat ' + beat.toFixed(1);
@@ -512,6 +553,40 @@ function updatePos(beat){
 function setPlayUI(p){
   const t=document.getElementById('tplay'); if(t) t.innerHTML = icon(p ? 'pause' : 'play');
   const s=document.getElementById('stopbtn'); if(s){ s.innerHTML = icon(p ? 'square' : 'play') + '<span class="lbl">' + (p ? 'Stop' : 'Sing it') + '</span>'; s.classList.toggle('playing', p); }
+  refreshAuditionUI(); updatePlayScope();
+}
+// Reflect play/stop state on every per-part play button (editor + player rows).
+function refreshAuditionUI(){
+  document.querySelectorAll('.partplay').forEach(b=>{
+    const playing = isPlaying && auditionTracks && auditionTracks[0] && auditionTracks[0].id === b.dataset.tid;
+    b.innerHTML = icon(playing ? 'square' : 'play');
+    b.title = playing ? 'Stop this part' : 'Play this part';
+    b.classList.toggle('on', !!playing);
+  });
+}
+// What the transport's play button will sound, given audition/solo/mute state.
+function playScopeLabel(){
+  if(!tracks.length) return '';
+  if(auditionTracks && auditionTracks.length) return auditionTracks.map(t=> t.label).join(', ');
+  const audible = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  if(!audible.length) return 'nothing (all muted)';
+  if(audible.length === tracks.length) return tracks.length === 1 ? audible[0].label : 'all parts';
+  return audible.map(t=> t.label).join(', ');
+}
+function updatePlayScope(){
+  const el = document.getElementById('playscope'); if(!el) return;
+  const s = playScopeLabel();
+  el.textContent = s ? 'plays: ' + s : '';
+}
+// Play just one part from the editor (the player's transport, scoped to it), so
+// you can hear a voice without switching to the Player tab.
+async function togglePartPlay(track){
+  await Tone.start(); initAudio();
+  if(isPlaying && auditionTracks && auditionTracks[0] === track){ stopPlayback(); return; }
+  stopPlayback();                       // clears any current scope
+  auditionTracks = [track]; dirty = true; computeEndBeat();
+  Tone.Transport.seconds = 0;
+  togglePlay();
 }
 
 function tick(){
@@ -534,16 +609,30 @@ async function togglePlay(){
 
 function stopPlayback(){
   Tone.Transport.stop(); Tone.Transport.seconds = 0;
+  auditionTracks = null; dirty = true;   // leave any per-part audition scope
   releaseAllInst(); isPlaying=false; setPlayUI(false); cancelAnimationFrame(rafId);
   paintHighlights(0); updatePos(0); syncSheetCursor(0);
 }
 
 function previewAt(beat){
-  const active = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  const active = activeTracks();
   const inst = instrument();
   active.forEach(t=> t.notes.forEach(n=>{
     if(!n.isRest && Math.abs(n.startBeat-beat) < 1e-3) inst.triggerAttackRelease(n.name, Math.min(0.7, n.durBeat*bs));
   }));
+}
+
+// Audition one note (used when you click a note in the editor) so pitches can be
+// checked without leaving the Edit tab. The sticky transport bar still plays the
+// whole piece on any tab; this is the quick per-note preview. Best-effort: a
+// blocked audio context (no gesture yet) just stays silent rather than throwing.
+async function auditionNote(n){
+  if(!n || n.isRest) return;
+  try{
+    await Tone.start(); initAudio();
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    instrument().triggerAttackRelease(n.name, Math.min(0.9, Math.max(0.25, (n.durBeat || 1) * spb)));
+  }catch(_){}
 }
 
 async function seek(beat, preview){
@@ -710,7 +799,9 @@ let osmd = null, sheetReady = false, voiceOsmd = [], voiceSheetsReady = false;
 
 // Shared OSMD options - engrave in the page's ink on the paper-coloured boxes
 // (set in CSS) so the staves match the rest of the UI instead of black-on-white.
-function OSMD_OPTS(extra){ return Object.assign({autoResize:true, backend:'svg', defaultColorMusic:'#211c16'}, extra||{}); }
+// autoResize is OFF: OSMD's resize-driven redraw silently wipes the highlight
+// classes we add to noteheads (and the edit preview already relies on this).
+function OSMD_OPTS(extra){ return Object.assign({autoResize:false, backend:'svg', defaultColorMusic:'#211c16'}, extra||{}); }
 
 function applyTransposeTo(inst){
   try{
@@ -770,7 +861,10 @@ function pitchXML(n){
 }
 
 // One part's measures. `events` is the gap-filled, measure-padded note list.
-function partMeasuresXML(notes, measureTicks, attrsXML){
+// totalMeasures pads this part to the score-wide length with trailing rest bars,
+// so all parts share a measure count (OSMD renders only up to the shortest part,
+// which would otherwise truncate the preview/exports to the shortest voice).
+function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures){
   // sort + fill gaps with rests so the timeline is contiguous from 0
   const ev = notes.slice().sort((a,b)=> a.startBeat - b.startBeat);
   const seq = []; let cursor = 0;
@@ -811,7 +905,7 @@ function partMeasuresXML(notes, measureTicks, attrsXML){
       }
     });
   });
-  const count = measures.length || 1;
+  const count = Math.max(measures.length || 1, totalMeasures || 1);
   let xml = '';
   for(let m=0; m<count; m++){
     const body = (measures[m] || [`<note><rest measure="yes"/><duration>${measureTicks}</duration><voice>1</voice></note>`]).join('');
@@ -830,6 +924,12 @@ function tracksToMusicXML(opts){
   const title = (opts.title != null ? opts.title : pieceName) || 'Untitled';
   const esc = s=> String(s).replace(/[<&>]/g, c=> ({'<':'&lt;','&':'&amp;','>':'&gt;'}[c]));
 
+  // Size the score to the longest voice, so shorter voices get trailing rest bars
+  // rather than truncating the whole render to the shortest voice's length.
+  let maxTick = 0;
+  list.forEach(t=> t.notes.forEach(n=> maxTick = Math.max(maxTick, Math.round((n.startBeat + n.durBeat) * XDIV))));
+  const totalMeasures = Math.max(1, Math.ceil(maxTick / measureTicks));
+
   let partList = '', partsXML = '';
   list.forEach((t,i)=>{
     const id = 'P'+(i+1);
@@ -838,7 +938,7 @@ function tracksToMusicXML(opts){
     const avg = pitched.length ? pitched.reduce((s,n)=> s+n.midi, 0)/pitched.length : 71;
     const clef = avg >= 60 ? '<clef><sign>G</sign><line>2</line></clef>' : '<clef><sign>F</sign><line>4</line></clef>';
     const attrs = `<attributes><divisions>${XDIV}</divisions><key><fifths>${fifths}</fifths></key><time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>${clef}</attributes>`;
-    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs)}</part>`;
+    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs, totalMeasures)}</part>`;
   });
   return `<?xml version="1.0" encoding="UTF-8"?>\n<score-partwise version="3.1"><work><work-title>${esc(title)}</work-title></work><part-list>${partList}</part-list>${partsXML}</score-partwise>`;
 }
@@ -938,9 +1038,24 @@ async function downloadScorePDF(){
 }
 
 // MusicXML for the whole score / one part: the untouched import while unedited
-// (best fidelity), otherwise our serialised note model (so edits show up).
-function scoreXML(){ return (lastXML && !edited) ? lastXML : tracksToMusicXML({beats:meterBeats, beatType:meterType}); }
-function partXML(track){ return (track.key && lastXML && !edited) ? buildVoiceXML(track) : tracksToMusicXML({tracks:[track], beats:meterBeats, beatType:meterType}); }
+// (best fidelity, matches the user's PDF), otherwise our serialised note model.
+// The serializer bakes the current (already-transposed) pitches in, so OSMD's
+// transpose must be applied ONLY when rendering the original import.
+let showDynamics = true;   // user toggle: show/hide dynamic markings (p, f, sf, cresc) on the sheets
+// Remove <direction> elements (dynamics, wedges, tempo words) from a score.
+function stripDynamics(xml){
+  try{
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if(doc.querySelector('parsererror')) return xml;
+    doc.querySelectorAll('direction').forEach(d=> d.remove());
+    return new XMLSerializer().serializeToString(doc);
+  }catch(_){ return xml; }
+}
+function maybeStrip(xml){ return showDynamics ? xml : stripDynamics(xml); }
+function scoreFromOriginal(){ return !!(lastXML && !edited); }
+function partFromOriginal(track){ return !!(track.key && lastXML && !edited); }
+function scoreXML(){ return maybeStrip(scoreFromOriginal() ? lastXML : tracksToMusicXML({beats:meterBeats, beatType:meterType})); }
+function partXML(track){ return maybeStrip(partFromOriginal(track) ? buildVoiceXML(track) : tracksToMusicXML({tracks:[track], beats:meterBeats, beatType:meterType})); }
 // Edits invalidate every rendered sheet so they re-render from the new notes.
 function invalidateSheets(){ tracks.forEach(t=>{ delete t._sheetHTML; delete t._sheetKey; }); osmd = null; sheetReady = false; }
 
@@ -952,15 +1067,17 @@ async function renderScore(){
   try{
     if(!osmd) osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay('sheet', OSMD_OPTS({drawTitle:true, followCursor:false, cursorsOptions:[{type:0, color:'#8c2f2a', alpha:0.3, follow:true}]}));
     await osmd.load(scoreXML());
-    if(transposeOffset) applyTransposeTo(osmd);
+    if(scoreFromOriginal() && transposeOffset) applyTransposeTo(osmd);   // serializer already carries the transpose
     osmd.render();
+    tagSheetNotes(osmd);   // mark noteheads so playback highlights the whole sounding chord
     try{ osmd.cursor.show(); osmd.cursor.reset(); }catch(_){}
     sheetReady = true; updateSheetBadges();
     msg.textContent = 'Rendered ✓';
   }catch(e){ sheetReady = false; msg.textContent = 'Could not render: ' + e.message; }
 }
 
-// Build a single-voice MusicXML by keeping only one (part, staff, voice).
+// Build a single-voice MusicXML by keeping only one (part, staff, voice) from the
+// original import. Faithful: chords, dynamics, and the source staff are preserved.
 function buildVoiceXML(track){
   const doc = new DOMParser().parseFromString(lastXML, 'application/xml');
   const [pi, staff, voice] = track.key.split('|');
@@ -987,16 +1104,56 @@ function buildVoiceXML(track){
 // (the serializer can engrave imported, typed, or MIDI parts alike).
 function canSheet(track){ return !!(window.opensheetmusicdisplay && track.notes && track.notes.some(n=> !n.isRest)); }
 
+// Tag each pitched notehead's SVG group with its beat window (and optionally a
+// track id) so playback can light it up the way the solfa cells do. Beats are in
+// quarter-note units to match our note model. Rests are skipped (no Pitch).
+// trackId: a fixed id for every note (per-part sheets). byIndex: derive the id
+// from the staff index = track order (the multi-part preview, one part per track).
+function tagSheetNotes(inst, trackId, byIndex){
+  try{
+    inst.GraphicSheet.MeasureList.forEach(row=> row.forEach((gm, idx)=>{
+      if(!gm) return;
+      const tid = trackId || (byIndex && tracks[idx] ? tracks[idx].id : null);
+      gm.staffEntries.forEach(se=> se.graphicalVoiceEntries.forEach(gve=> gve.notes.forEach(gn=>{
+        const sn = gn.sourceNote; if(!sn || !sn.Pitch) return;
+        const b0 = sn.getAbsoluteTimestamp().RealValue * 4;
+        const len = (sn.Length ? sn.Length.RealValue : 0) * 4;
+        const el = gn.getSVGGElement && gn.getSVGGElement();
+        if(!el) return;
+        el.classList.add('sheetnote');
+        el.dataset.b0 = b0.toFixed(4);
+        el.dataset.b1 = (b0 + len).toFixed(4);
+        if(tid) el.dataset.tid = tid;
+      })));
+    }));
+  }catch(_){}
+}
+
 // Render one part's staff into `box` (themed to the page) and cache the SVG so
 // later re-renders (solo/mute/collapse) reuse it instead of re-running OSMD.
 async function renderPartSheet(track, box){
   try{
     const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:false, followCursor:false}));
     await inst.load(partXML(track));
-    if(transposeOffset) applyTransposeTo(inst);
+    if(partFromOriginal(track) && transposeOffset) applyTransposeTo(inst);   // serializer already carries the transpose
+    box.querySelectorAll('p').forEach(p=> p.remove());   // OSMD draws alongside, not over, the "Rendering staff…" placeholder; drop it
     inst.render();
-    track._sheetHTML = box.innerHTML; track._sheetKey = transposeOffset;   // cache keyed by transpose
+    tagSheetNotes(inst, track.id);   // mark noteheads so playback can highlight them
+    track._sheetHTML = box.innerHTML; track._sheetKey = transposeOffset;   // cache keyed by transpose (data-attrs ride along)
+    repaintPlayhead();   // re-light the current note now that this staff exists (async render)
   }catch(e){ box.innerHTML = '<p class="hint" style="margin:4px">Could not engrave this part.</p>'; }
+}
+
+// Toggle the dynamic markings (p, f, sf, cresc) on the engraved sheets. Re-renders
+// per-part sheets and the full score (if shown) from the stripped/unstripped XML.
+function setDynamics(show){
+  showDynamics = show;
+  document.querySelectorAll('#dynToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.dyn === 'show') === show));
+  const wasScore = sheetReady;
+  invalidateSheets();
+  render();
+  if(wasScore) renderScore();
+  autosave();
 }
 
 // Master switch: flip every part to solfa or sheet at once (sheet-incapable
@@ -1007,42 +1164,34 @@ function setAllPartView(mode){
   render();
 }
 
-// Re-apply the current transpose to any already-rendered sheets.
+// Re-render any showing full score after a transpose. renderScore() reloads from
+// the correct source and only applies OSMD transpose for the original import, so
+// it handles both paths without double-transposing. Per-part sheets refresh via
+// render() (their cache is keyed by transposeOffset).
 function retransposeSheets(){
-  if(sheetReady && osmd){ applyTransposeTo(osmd); try{ osmd.render(); }catch(_){} }
-  if(voiceSheetsReady) voiceOsmd.forEach(o=>{ applyTransposeTo(o); try{ o.render(); }catch(_){} });
+  if(sheetReady) renderScore();
   updateSheetBadges();
 }
 
+// Move the sheet cursor to the note actually sounding at `beat` (best-effort,
+// guarded). It must sit on the note whose window contains `beat` (onset <= beat
+// < next onset), matching the audio + notehead highlight. Advancing while the
+// CURRENT onset < beat overshoots by one during a note's sustain, so we peek the
+// NEXT onset (via a cloned iterator) and only step when it is still <= beat.
 function syncSheetCursor(beat){
   if(!sheetReady || !osmd || !osmd.cursor) return;
   try{
     const cur = osmd.cursor;
-    const tsBeat = ()=>{
-      const it = cur.iterator;
+    const tsBeat = (it)=>{
       if(!it || it.EndReached || !it.currentTimeStamp) return Infinity;
       return it.currentTimeStamp.RealValue * 4;   // whole-note fraction -> quarter-note beats
     };
-    if(tsBeat() > beat + 1e-3) cur.reset();
+    if(tsBeat(cur.iterator) > beat + 1e-3) cur.reset();   // seeked backwards -> start over
     let guard = 0;
-    while(tsBeat() < beat - 1e-3 && guard++ < 20000) cur.next();
-    cur.update();
-  }catch(_){}
-}
-
-// Move the sheet cursor to whatever is playing at `beat` (best-effort, guarded).
-function syncSheetCursor(beat){
-  if(!sheetReady || !osmd || !osmd.cursor) return;
-  try{
-    const cur = osmd.cursor;
-    const tsBeat = ()=>{
-      const it = cur.iterator;
-      if(!it || it.EndReached || !it.currentTimeStamp) return Infinity;
-      return it.currentTimeStamp.RealValue * 4;   // whole-note fraction -> quarter-note beats
-    };
-    if(tsBeat() > beat + 1e-3) cur.reset();
-    let guard = 0;
-    while(tsBeat() < beat - 1e-3 && guard++ < 20000) cur.next();
+    while(guard++ < 20000){
+      const peek = cur.iterator.clone(); peek.moveToNext();
+      if(tsBeat(peek) <= beat + 1e-3) cur.next(); else break;   // next note has started -> advance
+    }
     cur.update();
   }catch(_){}
 }
@@ -1058,13 +1207,17 @@ const DUR_ABBR = {4:'w',3:'h.',2:'h',1.5:'q.',1:'q',0.75:'e.',0.5:'e',0.25:'s'};
 function durAbbr(d){ return DUR_ABBR[d] || (d+'b'); }
 
 let editOsmd = null, editPreviewTimer = 0, undoStack = [];
-function snapshot(){ return JSON.stringify({tracks, meterBeats, meterType, pieceName}); }
+// Capture key + transpose too, so undoing a transpose restores both the notes
+// (snapshot is taken before they are re-spelled) and the key/offset.
+function snapshot(){ return JSON.stringify({tracks, meterBeats, meterType, pieceName, transposeOffset, tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter}); }
 function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length > 80) undoStack.shift(); }
 function undo(){
   if(!undoStack.length) return;
   const s = JSON.parse(undoStack.pop());
   tracks = s.tracks; meterBeats = s.meterBeats; meterType = s.meterType; pieceName = s.pieceName;
-  editSel = null; afterEdit(false);
+  if(s.transposeOffset != null) transposeOffset = s.transposeOffset;
+  if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
+  editSel = null; afterEdit(false); updateSheetBadges();
 }
 
 function recomputeNote(n){
@@ -1073,8 +1226,28 @@ function recomputeNote(n){
   n.midi = (n.oct + 1) * 12 + n.pc;
   n.name = n.step + (n.alter > 0 ? '#'.repeat(n.alter) : n.alter < 0 ? 'b'.repeat(-n.alter) : '') + n.oct;
 }
+// Beats per bar in quarter-note units (matches the serializer's measureTicks).
+function barBeats(){ return (meterBeats || 4) * (4 / (meterType || 4)); }
 // Recompute sequential start beats + pitch fields (each part is monophonic here).
-function reflowTrack(t){ let cur = 0; (t.notes||[]).forEach(n=>{ n.startBeat = cur; cur += n.durBeat; recomputeNote(n); }); }
+// A note is also clamped so it never overruns its bar: the engraver already caps
+// the notehead to the barline, so the model (which drives the solfa duration
+// letter AND the audio) must agree, otherwise a too-long note sounds/labels as
+// the value you typed while the staff shows the shorter, bar-fitting one.
+function reflowTrack(t){
+  const bb = barBeats();
+  let cur = 0;
+  (t.notes || []).forEach(n=>{
+    n.startBeat = cur;
+    if(bb > 0){
+      let posInBar = cur % bb;
+      if(posInBar < 1e-6 || bb - posInBar < 1e-6) posInBar = 0;   // sitting on a barline -> whole bar free
+      const remaining = bb - posInBar;
+      if(n.durBeat > remaining + 1e-6) n.durBeat = remaining;     // never cross the barline
+    }
+    cur += n.durBeat;
+    recomputeNote(n);
+  });
+}
 function defaultNote(prev){
   if(prev && !prev.isRest) return {isRest:false, step:prev.step, alter:prev.alter||0, oct:prev.oct, durBeat:prev.durBeat};
   return {isRest:false, step:'C', alter:0, oct:5, durBeat:1};
@@ -1102,7 +1275,7 @@ function renderEditor(){
   wrap.innerHTML = '';
   if(!tracks.length){
     wrap.innerHTML = '<p class="hint">Nothing to edit yet. Load a file or type a melody above, or click <b>New piece</b> to start a blank one.</p>';
-    renderNoteEditor(); return;
+    return;
   }
   // Flag likely OMR slips (very short parts) so the user can review and remove
   // them by hand. Nothing is ever deleted automatically.
@@ -1118,8 +1291,17 @@ function renderEditor(){
     wrap.append(notice);
   }
   tracks.forEach(t=>{
-    const part = document.createElement('div'); part.className = 'epart' + (suspectIds.has(t.id) ? ' suspect' : '');
+    const isSel = !!(editSel && editSel.trackId === t.id);
+    const collapsed = !!t.editCollapsed && !isSel;   // never collapse the part you're editing
+    const part = document.createElement('div'); part.className = 'epart' + (suspectIds.has(t.id) ? ' suspect' : '') + (collapsed ? ' collapsed' : '');
     const head = document.createElement('div'); head.className = 'epart-head';
+    const caret = document.createElement('button'); caret.className = 'ecaret';
+    caret.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-down');
+    caret.title = collapsed ? 'Expand this part' : 'Collapse this part';
+    caret.onclick = ()=>{ t.editCollapsed = !t.editCollapsed; renderEditor(); };
+    const playBtn = document.createElement('button'); playBtn.className = 'epart-play partplay'; playBtn.dataset.tid = t.id;
+    playBtn.innerHTML = icon('play'); playBtn.title = 'Play this part';
+    playBtn.onclick = ()=> togglePartPlay(t);
     const name = document.createElement('input'); name.type = 'text'; name.value = t.label || ''; name.placeholder = 'Part name'; name.title = 'Rename this part';
     name.oninput = ()=>{ t.label = name.value; render(); scheduleEditPreview(); };
     const pc = pitchedCount(t);
@@ -1128,31 +1310,40 @@ function renderEditor(){
     if(suspectIds.has(t.id)) count.title = 'Very short, likely an OMR slip. Keep it or delete it.';
     const del = document.createElement('button'); del.className = 'ghost delpart'; del.textContent = 'Delete part';
     del.onclick = ()=>{ pushUndo(); tracks = tracks.filter(x=> x !== t); if(editSel && editSel.trackId === t.id) editSel = null; afterEdit(); };
-    head.append(name, count, del);
+    head.append(caret, playBtn, name, count, del);
     part.append(head);
-    const chips = document.createElement('div'); chips.className = 'echips';
-    t.notes.forEach((n,i)=>{
-      const c = document.createElement('div');
-      c.className = 'echip' + (n.isRest ? ' rest' : '') + (editSel && editSel.trackId === t.id && editSel.index === i ? ' sel' : '');
-      if(n.isRest) c.innerHTML = `<span class="solf">–</span><span class="nm">rest</span><span class="dur">${durAbbr(n.durBeat)}</span>`;
-      else { const a = analyze(n); c.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span><span class="dur">${durAbbr(n.durBeat)}</span>`; }
-      c.onclick = ()=>{ editSel = {trackId:t.id, index:i}; renderEditor(); };
-      chips.append(c);
-    });
-    const add = document.createElement('div'); add.className = 'echip addchip'; add.textContent = '+'; add.title = 'Add a note to the end of this part';
-    add.onclick = ()=>{ pushUndo(); t.notes.push(defaultNote(t.notes[t.notes.length-1])); editSel = {trackId:t.id, index:t.notes.length-1}; afterEdit(); };
-    chips.append(add);
-    part.append(chips);
+    if(!collapsed){
+      const chips = document.createElement('div'); chips.className = 'echips';
+      t.notes.forEach((n,i)=>{
+        const c = document.createElement('div');
+        c.id = 'ec-' + t.id + '-' + i;   // so playback can light the sounding chip
+        c.className = 'echip' + (n.isRest ? ' rest' : '') + (isSel && editSel.index === i ? ' sel' : '');
+        if(n.isRest) c.innerHTML = `<span class="solf">–</span><span class="nm">rest</span><span class="dur">${durAbbr(n.durBeat)}</span>`;
+        else { const a = analyze(n); c.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span><span class="dur">${durAbbr(n.durBeat)}</span>`; }
+        c.onclick = ()=>{ editSel = {trackId:t.id, index:i}; renderEditor(); highlightEditorSelection(); if(!isPlaying) auditionNote(n); };
+        chips.append(c);
+      });
+      const add = document.createElement('div'); add.className = 'echip addchip'; add.textContent = '+'; add.title = 'Add a note to the end of this part';
+      add.onclick = ()=>{ pushUndo(); t.notes.push(defaultNote(t.notes[t.notes.length-1])); editSel = {trackId:t.id, index:t.notes.length-1}; afterEdit(); };
+      chips.append(add);
+      part.append(chips);
+      // The note editor lives right under the part that owns the selected note,
+      // so you never have to scroll past other parts to change or delete it.
+      if(isSel && t.notes[editSel.index]){
+        const ne = document.createElement('div'); ne.className = 'noteeditor';
+        renderNoteEditor(ne);
+        part.append(ne);
+      }
+    }
     wrap.append(part);
   });
-  renderNoteEditor();
+  refreshAuditionUI();   // show the stop icon if a part is currently auditioning
 }
 
-function renderNoteEditor(){
-  const panel = document.getElementById('noteeditor'); if(!panel) return;
+// Fill the per-note controls into `panel` (an inline box under the selected part).
+function renderNoteEditor(panel){
   const n = selectedNote();
-  if(!n){ panel.hidden = true; panel.innerHTML = ''; return; }
-  panel.hidden = false;
+  if(!panel || !n) return;
   const letterOpts = PITCH_LETTERS.map(l=> `<option ${!n.isRest && n.step === l ? 'selected' : ''}>${l}</option>`).join('');
   const accOpts = ACCIDENTALS.map(([v,s])=> `<option value="${v}" ${!n.isRest && (n.alter||0) === v ? 'selected' : ''}>${s}</option>`).join('');
   const durOpts = EDIT_DURS.map(([lab,v])=> `<option value="${v}" ${n.durBeat === v ? 'selected' : ''}>${lab}</option>`).join('');
@@ -1192,7 +1383,8 @@ async function renderEditPreview(){
     if(!editOsmd){ box.innerHTML = ''; editOsmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:true, followCursor:false, autoResize:false})); }
     await editOsmd.load(tracksToMusicXML({beats:meterBeats, beatType:meterType}));
     editOsmd.render();
-    highlightEditorSelection();   // re-apply the staff highlight after each render
+    tagSheetNotes(editOsmd, null, true);   // per-track tags so playback lights the right notes
+    highlightEditorSelection();            // re-apply the staff highlight after each render
   }catch(e){ box.innerHTML = '<p class="hint" style="margin:6px">Could not engrave: ' + e.message + '</p>'; editOsmd = null; }
 }
 
@@ -1240,6 +1432,7 @@ function sessionState(){
     v: 1, tracks, meterBeats, meterType, pieceName, transposeOffset,
     tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter,
     bpm: parseInt(document.getElementById('bpm').value) || 84,
+    showDynamics,
   };
 }
 function autosave(){
@@ -1256,7 +1449,8 @@ function restoreState(s){
   tracks.forEach(t=>{ if(t.vol === undefined) t.vol = 1; if(t.enabled === undefined) t.enabled = true; });
   if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
   if(s.bpm) setTempo(s.bpm);
-  invalidateSheets(); render(); contentChanged();
+  if(s.showDynamics != null){ showDynamics = s.showDynamics; document.querySelectorAll('#dynToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.dyn === 'show') === showDynamics)); }
+  invalidateSheets(); render(); syncEditorView(); contentChanged();
   return true;
 }
 function restoreSession(){
@@ -1278,12 +1472,20 @@ function openProject(file){
   r.readAsText(file);
 }
 
+// True when the Edit tab is the one on screen. Used to keep the editor in sync
+// with content loaded/transposed from controls that live outside it (file load,
+// the melody box, presets, key/transpose), so it never needs a tab bounce to refresh.
+function editVisible(){ const v = document.getElementById('view-edit'); return !!(v && !v.hidden); }
+function syncEditorView(){ if(editVisible()){ renderEditor(); scheduleEditPreview(); } }
+function playerVisible(){ const v = document.getElementById('view-player'); return !!(v && !v.hidden); }
+
 // Show a tab by name (and refresh the editor when entering it).
 function switchTab(view){
   document.querySelectorAll('#tabs .tab').forEach(x=> x.classList.toggle('on', x.dataset.view === view));
   document.querySelectorAll('.view').forEach(s=> s.hidden = (s.id !== 'view-' + view));
   if(view !== 'edit'){ const ban = document.getElementById('omrbanner'); if(ban) ban.hidden = true; }
   if(view === 'edit'){ renderEditor(); renderEditPreview(); }
+  if(view === 'player') render();   // now visible: engrave any per-part sheets that were deferred while hidden
 }
 
 // Phase 5: after OMR, land in the editor with a "check me" banner before the player.
@@ -1374,7 +1576,7 @@ function initStaffEditing(){
     const hit = noteAtPoint(pixelToUnit(svg, e.clientX, e.clientY)); if(!hit) return;
     editSel = hit; renderEditor(); highlightEditorSelection();
     const n = selectedNote();
-    if(n && !n.isRest){ dragState = {startY: e.clientY, n}; e.preventDefault(); }
+    if(n && !n.isRest){ if(!isPlaying) auditionNote(n); dragState = {startY: e.clientY, n}; e.preventDefault(); }
   });
   document.addEventListener('mousemove', e=>{
     if(!dragState) return;
@@ -1399,10 +1601,19 @@ document.getElementById('savexml').addEventListener('click', downloadMusicXML);
 document.getElementById('savepng').addEventListener('click', downloadScorePNG);
 document.getElementById('savepdf').addEventListener('click', downloadScorePDF);
 document.querySelectorAll('#masterview button').forEach(b=> b.addEventListener('click', ()=> setAllPartView(b.dataset.m)));
+document.querySelectorAll('#dynToggle button').forEach(b=> b.addEventListener('click', ()=> setDynamics(b.dataset.dyn === 'show')));
 document.getElementById('trup').addEventListener('click', ()=> transposeBy(1));
 document.getElementById('trdown').addEventListener('click', ()=> transposeBy(-1));
 document.querySelectorAll('#tabs .tab').forEach(b=> b.addEventListener('click', ()=> switchTab(b.dataset.view)));
 document.getElementById('omrDone').addEventListener('click', ()=> switchTab('player'));
+// Click a notehead on the player staves or the full score to seek there (like the
+// solfa cells). Delegated, so it works for cached/re-rendered sheets.
+function seekFromSheetClick(e){
+  const el = e.target.closest && e.target.closest('.sheetnote');
+  if(el && el.dataset.b0 !== undefined) seek(parseFloat(el.dataset.b0), true);
+}
+document.getElementById('stave').addEventListener('click', seekFromSheetClick);
+document.getElementById('sheet').addEventListener('click', seekFromSheetClick);
 // Editor controls
 document.getElementById('edNew').addEventListener('click', newPiece);
 document.getElementById('edSATB').addEventListener('click', newSATB);
@@ -1416,8 +1627,6 @@ document.getElementById('edBeatType').addEventListener('change', setMeterFromUI)
 document.getElementById('edTitle').addEventListener('input', e=>{ pieceName = e.target.value; scheduleEditPreview(); });
 initStaffEditing();
 document.getElementById('tplay').addEventListener('click', togglePlay);
-// Big button: stops while playing, starts when stopped/paused (label tracks state).
-document.getElementById('stopbtn').addEventListener('click', ()=>{ if(isPlaying) stopPlayback(); else togglePlay(); });
 document.getElementById('tback').addEventListener('click', ()=>step(-1));
 document.getElementById('tfwd').addEventListener('click', ()=>step(1));
 const scrub = document.getElementById('scrub');
@@ -1445,8 +1654,17 @@ document.addEventListener('keydown', e=>{
   else if(e.code==='ArrowRight'){ e.preventDefault(); step(1); }
   else if(e.code==='ArrowLeft'){ e.preventDefault(); step(-1); }
 });
-keySel.addEventListener('change', ()=>{ syncTonicFromSel(); render(); autosave(); });
-document.getElementById('notes').addEventListener('input', buildManual);
+// Movable-do: choosing a key transposes the music into it (so a major scale still
+// reads do-re-mi), rather than re-spelling the same pitches into chromatic degrees.
+keySel.addEventListener('change', ()=>{
+  const selPc = parseInt(keySel.value);
+  let d = ((selPc - currentTonic.pc) % 12 + 12) % 12; if(d > 6) d -= 12;   // nearest direction
+  if(d === 0){ syncTonicFromSel(); return; }
+  if(tracks.length){ transposeBy(d); } else { syncTonicFromSel(); render(); }
+  autosave();
+});
+// The melody box rebuilds the piece only on Re-parse (or an example button), not
+// on every keystroke -- typing no longer silently clobbers a multi-part piece.
 document.getElementById('parsebtn').addEventListener('click', buildManual);
 document.getElementById('xmlbtn').addEventListener('click', ()=>{ pieceName=''; loadMusicXMLText(document.getElementById('xml').value.trim(), document.getElementById('xmlmsg')); });
 document.getElementById('loadfilebtn').addEventListener('click', ()=>{

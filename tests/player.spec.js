@@ -457,3 +457,453 @@ test('project: Save downloads a .solfege.json and Open restores it', async ({ pa
   expect(await page.evaluate(() => tracks.length)).toBe(4);
   expect(await page.evaluate(() => pieceName)).toBe('ProjTest');
 });
+
+// ---- movable-do: changing key transposes (regression: no double-transpose) ----
+
+test('key change transposes movable-do; sheet is not double-transposed', async ({ page }) => {
+  // default melody is the C-major scale in C; choose E major
+  await page.selectOption('#key', { label: 'E major' });
+  await page.waitForTimeout(200);
+  // movable do: solfège stays do-re-mi..., and the notes actually move to E major
+  expect(await page.locator('#stave .note .solf').allTextContents()).toEqual(['Do', 'Re', 'Mi', 'Fa', 'So', 'La', 'Ti', 'Do']);
+  expect(await page.evaluate(() => tracks[0].notes.map((n) => n.name))).toEqual(['E4', 'F#4', 'G#4', 'A4', 'B4', 'C#5', 'D#5', 'E5']);
+  expect(await page.evaluate(() => transposeOffset)).toBe(4);
+  // the serialized sheet carries E major (4 sharps) in the key signature
+  const fifths = await page.evaluate(() => new DOMParser()
+    .parseFromString(tracksToMusicXML({ beats: meterBeats, beatType: meterType }), 'application/xml')
+    .querySelector('key fifths').textContent);
+  expect(fifths).toBe('4');
+  // rendering the full score must NOT re-apply OSMD transpose on top (would double it)
+  await page.locator('#tabs .tab', { hasText: 'Full score' }).click();
+  await page.locator('#rendersheet').click();
+  await page.waitForFunction(() => typeof osmd !== 'undefined' && osmd && osmd.GraphicSheet, null, { timeout: 8000 });
+  expect(await page.evaluate(() => osmd.Sheet.Transpose || 0)).toBe(0);
+});
+
+// ---- manual entry folded into the Edit tab + live editor sync ----
+
+test('manual entry + presets live in the always-visible load panel', async ({ page }) => {
+  // the melody box and the four quick-start examples sit in the load panel, not the editor
+  expect(await page.locator('#view-edit #notes').count()).toBe(0);
+  const loadPanel = page.locator('.upload').first().locator('xpath=ancestor::div[contains(@class,"panel")]');
+  expect(await loadPanel.locator('#notes').count()).toBe(1);
+  expect(await loadPanel.locator('.ghost[data-ex]').count()).toBe(4);
+});
+
+test('presets reflect on the Edit tab immediately (no tab bounce needed)', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+  await page.locator('summary', { hasText: 'Type a melody by hand' }).click();   // open the load-panel section
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  // clear to a blank one note piece
+  await page.locator('#edNew').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(1);
+
+  // click a preset (in the load panel) while staying on the Edit tab
+  await page.locator('.ghost[data-ex]', { hasText: 'Twinkle' }).click();
+  await page.waitForTimeout(150);
+
+  // editor grid reflects the new melody right away, without leaving the tab
+  expect(await page.locator('#view-edit').isVisible()).toBe(true);
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(14);
+  expect(await page.locator('.epart').first().locator('.echip:not(.addchip)').count()).toBe(14);
+});
+
+test('transposing while on the Edit tab refreshes its chips immediately', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.waitForTimeout(200);
+  // bump up a semitone from the top transpose control; the editor must re-render in place
+  await page.locator('#trup').click();
+  await page.waitForTimeout(200);
+  expect(await page.locator('#view-edit').isVisible()).toBe(true);
+  // first Soprano note moved C5 -> C#5/Db5 and the chip text follows the model
+  const name = await page.evaluate(() => tracks[0].notes[0].name);
+  const chip = await page.locator('.epart').first().locator('.echip:not(.addchip)').first().locator('.nm').textContent();
+  expect(chip).toBe(name);
+});
+
+// ---- playback highlights the engraved staff (not just the solfa cells) ----
+
+test('playback lights the sounding note on a per-part sheet', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .sheetnote').length > 0, null, { timeout: 8000 });
+  // every pitched notehead is tagged with its beat window
+  expect(await page.locator('.voicebox .sheetnote').count()).toBeGreaterThan(0);
+
+  // at beat 0 the first notehead lights up, mirroring the solfa cell behaviour
+  await page.evaluate(() => paintHighlights(0));
+  expect(await page.locator('.voicebox .sheetnote.playing').count()).toBeGreaterThan(0);
+  const first = await page.evaluate(() => {
+    const el = document.querySelector('.voicebox .sheetnote.playing');
+    return { b0: parseFloat(el.dataset.b0), b1: parseFloat(el.dataset.b1) };
+  });
+  expect(first.b0).toBeLessThanOrEqual(0);
+  expect(first.b1).toBeGreaterThan(0);
+
+  // advance into the 3rd quarter note (beat 2..3): only notes whose window holds 2.5 are lit
+  await page.evaluate(() => paintHighlights(2.5));
+  const lit = await page.evaluate(() => [...document.querySelectorAll('.voicebox .sheetnote.playing')]
+    .map((el) => [parseFloat(el.dataset.b0), parseFloat(el.dataset.b1)]));
+  expect(lit.length).toBeGreaterThan(0);
+  expect(lit.every(([b0, b1]) => b0 <= 2.5 && b1 > 2.5)).toBe(true);
+
+  // a muted part does not light up
+  await page.evaluate(() => { tracks[0].enabled = false; render(); });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => paintHighlights(0));
+  expect(await page.locator('.voicebox .sheetnote.playing').count()).toBe(0);
+});
+
+test('playback lights noteheads on the full score too', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Full score' }).click();
+  await page.locator('#rendersheet').click();
+  await page.waitForFunction(() => document.querySelectorAll('#sheet .sheetnote').length > 0, null, { timeout: 8000 });
+  await page.evaluate(() => paintHighlights(0));
+  // both voices sound at beat 0, so at least the two opening noteheads light up
+  expect(await page.locator('#sheet .sheetnote.playing').count()).toBeGreaterThan(0);
+});
+
+// ---- melody box is gated behind Re-parse (no per-keystroke clobber) ----
+
+test('melody box rebuilds only on Re-parse, not on every keystroke', async ({ page }) => {
+  await loadSATB(page);
+  expect(await page.evaluate(() => tracks.length)).toBe(2);
+  await page.locator('summary', { hasText: 'Type a melody by hand' }).click();
+  await page.fill('#notes', 'C4 D4 E4');
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks.length)).toBe(2);            // typing did not clobber the 2-part piece
+  await page.locator('#parsebtn').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks.length)).toBe(1);            // Re-parse rebuilt to a single melody
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(3);
+});
+
+// ---- note duration is clamped to the bar (sound + solfa agree with the sheet) ----
+
+test('duration clamps to the bar: model, audio, label, and sheet all agree', async ({ page }) => {
+  const r = await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; soloActive = false; edited = true;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes: [
+      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 4 },   // bar 1: whole note
+      { isRest: false, step: 'D', alter: 0, oct: 5, durBeat: 1 },   // bar 2: quarter (3 beats left)
+      { isRest: false, step: 'E', alter: 0, oct: 5, durBeat: 4 },   // ask for a whole -> must clamp to 3
+    ] }];
+    tracks.forEach(reflowTrack);
+    computeEndBeat();
+    const doc = new DOMParser().parseFromString(tracksToMusicXML({ beats: 4, beatType: 4 }), 'application/xml');
+    return {
+      dur2: tracks[0].notes[2].durBeat,
+      label2: durAbbr(tracks[0].notes[2].durBeat),
+      end: endBeat,
+      measures: doc.querySelectorAll('part measure').length,
+    };
+  });
+  expect(r.dur2).toBe(3);        // whole note clamped to the 3 remaining beats
+  expect(r.label2).toBe('h.');   // solfa label shows a dotted half, matching the staff
+  expect(r.end).toBe(8);         // audio ends at two full bars, no spillover beat
+  expect(r.measures).toBe(2);    // no third measure
+});
+
+test('duration clamp respects the meter: a whole note in 3/4 becomes a dotted half', async ({ page }) => {
+  const dur = await page.evaluate(() => {
+    meterBeats = 3; meterType = 4; soloActive = false; edited = true;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes: [
+      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 4 },
+    ] }];
+    tracks.forEach(reflowTrack);
+    return tracks[0].notes[0].durBeat;
+  });
+  expect(dur).toBe(3);   // can't fit a 4-beat note in a 3-beat bar
+});
+
+// ---- in-tab note preview (audition) ----
+
+test('editor: clicking a note auditions it in-tab without errors', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  expect(await page.evaluate(() => typeof auditionNote)).toBe('function');
+  await page.locator('.epart').first().locator('.echip:not(.addchip)').first().click();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => editSel && editSel.index)).toBe(0);
+  expect(page.errors).toEqual([]);   // a blocked/again-started audio context must not throw
+});
+
+// ---- master Solfa/Sheet switch reflects the real per-part state ----
+
+// ---- full-score cursor lands on the sounding note (no off-by-one) ----
+
+test('full score cursor sits on the sounding note, not one ahead', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Full score' }).click();
+  await page.locator('#rendersheet').click();
+  await page.waitForFunction(() => document.querySelectorAll('#sheet .sheetnote').length > 0, null, { timeout: 8000 });
+  const at = (beat) => page.evaluate((b) => {
+    syncSheetCursor(b);
+    const it = osmd.cursor.iterator;
+    return (it && it.currentTimeStamp) ? it.currentTimeStamp.RealValue * 4 : null;
+  }, beat);
+  // SATB are quarter notes onset at beats 0,1,2,3; a mid-note beat maps to that note's onset
+  expect(await at(0.5)).toBe(0);   // during note 0 (was 1 before the fix)
+  expect(await at(1.5)).toBe(1);
+  expect(await at(2.5)).toBe(2);
+  expect(await at(0.5)).toBe(0);   // seeking back resets correctly
+});
+
+// ---- transpose is undoable ----
+
+test('transpose is undoable: notes, key, and offset all revert', async ({ page }) => {
+  await loadSATB(page);   // C major, Soprano C5 D5 E5 F5, offset 0
+  const before = await page.evaluate(() => ({ names: tracks[0].notes.map((n) => n.name), off: transposeOffset, pc: currentTonic.pc }));
+  expect(before.off).toBe(0);
+
+  await page.locator('#trup').click();   // up a semitone
+  const up = await page.evaluate(() => ({ off: transposeOffset, pc: currentTonic.pc, names: tracks[0].notes.map((n) => n.name) }));
+  expect(up.off).toBe(1);
+  expect(up.pc).not.toBe(before.pc);
+  expect(up.names).not.toEqual(before.names);
+
+  // undo from the editor button (works regardless of which tab transposed)
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.locator('#edUndo').click();
+  await page.waitForTimeout(150);
+  const after = await page.evaluate(() => ({ names: tracks[0].notes.map((n) => n.name), off: transposeOffset, pc: currentTonic.pc }));
+  expect(after.off).toBe(0);
+  expect(after.pc).toBe(before.pc);
+  expect(after.names).toEqual(before.names);
+});
+
+test('master view switch goes neutral when parts are mixed', async ({ page }) => {
+  await loadSATB(page);
+  const isOn = (name) => page.locator('#masterview button', { hasText: name }).evaluate((el) => el.classList.contains('on'));
+  // both parts start on Solfa -> master shows Solfa active
+  expect(await isOn('Solfa')).toBe(true);
+  // flip only Soprano to Sheet -> mixed -> neither master button is active
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForTimeout(800);
+  expect(await isOn('Solfa')).toBe(false);
+  expect(await isOn('Sheet')).toBe(false);
+});
+
+// ---- the fifth degree reads "So", not "Sol" ----
+
+test('the fifth degree is labelled So, not Sol', async ({ page }) => {
+  // boot melody is the C-major scale in C major
+  expect(await page.locator('#stave .note .solf').allTextContents()).toEqual(['Do', 'Re', 'Mi', 'Fa', 'So', 'La', 'Ti', 'Do']);
+});
+
+// ---- chords collapse to a single (top) note per part ----
+
+test('import is faithful: chords are kept, no notes dropped', async ({ page }) => {
+  const xml = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>V</part-name></score-part></part-list>`
+    + `<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>`
+    + `<note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>`
+    + `<note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>`
+    + `<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>`
+    + `</measure></part></score-partwise>`;
+  const r = await page.evaluate((x) => { loadMusicXMLText(x, null); return { parts: tracks.length, notes: tracks[0].notes.map((n) => n.name) }; }, xml);
+  expect(r.parts).toBe(1);
+  expect(r.notes).toEqual(['E4', 'G4', 'C4']);   // chord E4+G4 both kept (faithful), then C4
+});
+
+// ---- dynamics can be toggled on the engraved sheets ----
+
+test('dynamics toggle strips and restores direction markings', async ({ page }) => {
+  const xml = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>V</part-name></score-part></part-list>`
+    + `<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>`
+    + `<direction placement="below"><direction-type><dynamics><p/></dynamics></direction-type></direction>`
+    + `<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><type>whole</type></note>`
+    + `</measure></part></score-partwise>`;
+  await page.evaluate((x) => loadMusicXMLText(x, null), xml);
+  const directions = () => page.evaluate(() => (scoreXML().match(/<direction\b/g) || []).length);
+  expect(await directions()).toBeGreaterThan(0);   // shown by default (faithful)
+  await page.evaluate(() => setDynamics(false));
+  expect(await directions()).toBe(0);              // hidden -> stripped
+  await page.evaluate(() => setDynamics(true));
+  expect(await directions()).toBeGreaterThan(0);   // shown again
+});
+
+// ---- editor: per-part play (player capabilities without leaving Edit) ----
+
+test('editor: a per-part play button scopes playback to that part', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  expect(await page.locator('.epart .epart-play').count()).toBe(2);
+  // play just the first part
+  await page.locator('.epart').first().locator('.epart-play').click();
+  await page.waitForTimeout(250);
+  const s = await page.evaluate(() => ({ len: auditionTracks ? auditionTracks.length : 0, id: auditionTracks && auditionTracks[0] && auditionTracks[0].id }));
+  expect(s.len).toBe(1);
+  expect(s.id).toBe('t0');   // scoped to Soprano only
+  // clicking again stops and clears the scope
+  await page.locator('.epart').first().locator('.epart-play').click();
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => auditionTracks)).toBe(null);
+});
+
+// ---- editor: selecting on the grid highlights the staff immediately ----
+
+test('selecting a grid note highlights it on the preview staff right away', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#editsheet svg').length > 0, null, { timeout: 8000 });
+  expect(await page.locator('#editsheet .ednote-sel').count()).toBe(0);   // nothing selected yet
+  // a single grid click is enough; no second action needed
+  await page.locator('.epart').first().locator('.echip:not(.addchip)').nth(1).click();
+  await expect(page.locator('#editsheet .ednote-sel')).not.toHaveCount(0);
+});
+
+// ---- editor: note editor sits under the selected part; parts collapse ----
+
+test('the note editor appears under the part that owns the selected note', async ({ page }) => {
+  await loadSATB(page);   // Soprano, Alto
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  // select in Soprano -> editor under the first part only
+  await page.locator('.epart').first().locator('.echip:not(.addchip)').first().click();
+  expect(await page.locator('.epart').first().locator('#neStep').count()).toBe(1);
+  expect(await page.locator('.epart').nth(1).locator('#neStep').count()).toBe(0);
+  // select in Alto -> editor moves under the second part
+  await page.locator('.epart').nth(1).locator('.echip:not(.addchip)').first().click();
+  expect(await page.locator('.epart').nth(1).locator('#neStep').count()).toBe(1);
+  expect(await page.locator('.epart').first().locator('#neStep').count()).toBe(0);
+});
+
+test('editor parts are collapsible', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  const sop = page.locator('.epart').first();
+  expect(await sop.locator('.echips').count()).toBe(1);
+  await sop.locator('.ecaret').click();
+  expect(await sop.locator('.echips').count()).toBe(0);   // collapsed -> chips hidden
+  await sop.locator('.ecaret').click();
+  expect(await sop.locator('.echips').count()).toBe(1);   // expands again
+});
+
+// ---- serializer pads parts so OSMD doesn't truncate to the shortest voice ----
+
+test('serializer pads short voices to the longest (preview spans the whole piece)', async ({ page }) => {
+  const r = await page.evaluate(() => {
+    const short = { label: 'S', notes: [ { isRest: false, step: 'C', alter: 0, oct: 5, midi: 72, name: 'C5', startBeat: 0, durBeat: 4 } ] };       // 1 bar
+    const long = { label: 'L', notes: [0, 4, 8].map((b) => ({ isRest: false, step: 'E', alter: 0, oct: 4, midi: 64, name: 'E4', startBeat: b, durBeat: 4 })) };  // 3 bars
+    const ser = tracksToMusicXML({ tracks: [short, long], beats: 4, beatType: 4 });
+    const doc = new DOMParser().parseFromString(ser, 'application/xml');
+    return [...doc.querySelectorAll('part')].map((p) => p.querySelectorAll('measure').length);
+  });
+  expect(r).toEqual([3, 3]);   // the 1-bar voice is padded to match the 3-bar voice
+});
+
+// ---- editor chips follow playback ----
+
+test('editor: chips light up to follow the sounding note', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  // at beat 0 the first chip of each part is lit
+  await page.evaluate(() => paintHighlights(0));
+  expect(await page.locator('.epart').first().locator('.echip.eplaying').count()).toBeGreaterThan(0);
+  // SATB are quarter notes; at beat 1.5 the index-1 chips are the ones lit
+  await page.evaluate(() => paintHighlights(1.5));
+  const lit = await page.evaluate(() => [...document.querySelectorAll('.epart .echip.eplaying')].map((e) => e.id));
+  expect(lit.length).toBeGreaterThan(0);
+  expect(lit.every((id) => /-1$/.test(id))).toBe(true);
+});
+
+// ---- paused-note highlight survives a solfa<->sheet view toggle ----
+
+test('paused note stays highlighted when switching a part between sheet and solfa', async ({ page }) => {
+  await loadSATB(page);
+  // Soprano on Sheet, rendered
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .sheetnote').length > 0, null, { timeout: 8000 });
+  // simulate a paused playhead at beat 2 (no audio gesture needed)
+  await page.evaluate(() => { bs = 60 / (parseInt(document.getElementById('bpm').value) || 84); Tone.Transport.seconds = 2 * bs; paintHighlights(2); });
+  expect(await page.locator('.voice', { hasText: 'Soprano' }).locator('.voicebox .sheetnote.playing').count()).toBeGreaterThan(0);
+
+  // switch to Solfa: the paused note must still be lit on the cells
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Solfa', exact: true }).click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => { const t = tracks.find((x) => x.label === 'Soprano'); const el = document.getElementById(t.id + '-2'); return !!(el && el.classList.contains('active')); })).toBe(true);
+
+  // and vice versa: back to Sheet, the staff note lights again
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => {
+    const v = [...document.querySelectorAll('.voice')].find((e) => e.textContent.includes('Soprano'));
+    return v && v.querySelector('.voicebox .sheetnote.playing');
+  }, null, { timeout: 8000 });
+});
+
+// ---- per-part staff re-renders after an edit (no stuck "Rendering staff") ----
+
+test('per-part staff updates after an edit instead of staying blank', async ({ page }) => {
+  await loadSATB(page);
+  // show Soprano as a staff in the player (renders while visible)
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox svg').length > 0, null, { timeout: 8000 });
+  // edit a Soprano note on the Edit tab (player view is hidden here)
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.locator('.epart').first().locator('.echip:not(.addchip)').first().click();
+  await page.locator('#neStep').selectOption('A');
+  await page.waitForTimeout(300);
+  // back to the player: the staff must engrave the update, not sit on "Rendering staff"
+  await page.locator('#tabs .tab', { hasText: 'Player' }).click();
+  await page.waitForFunction(() => {
+    const v = [...document.querySelectorAll('.voice')].find((el) => el.textContent.includes('Soprano'));
+    return v && v.querySelector('.voicebox svg');
+  }, null, { timeout: 8000 });
+  const box = page.locator('.voice', { hasText: 'Soprano' }).locator('.voicebox');
+  expect(await box.locator('svg').count()).toBeGreaterThan(0);
+  expect(await box.innerText()).not.toContain('Rendering staff');
+});
+
+// ---- play-scope clarity: removed top button, per-part play in player, scope label ----
+
+test('the top "Sing it" button is gone; transport bar still drives playback', async ({ page }) => {
+  expect(await page.locator('#stopbtn').count()).toBe(0);
+  expect(await page.locator('#transportbar #tplay').count()).toBe(1);
+});
+
+test('player: each voice row has its own play button', async ({ page }) => {
+  await loadSATB(page);
+  expect(await page.locator('.voice .vplay').count()).toBe(2);
+});
+
+test('player per-part play scopes playback to that one voice', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('.voice', { hasText: 'Alto' }).locator('.vplay').click();
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => auditionTracks && auditionTracks.map((t) => t.label))).toEqual(['Alto']);
+  expect(await page.locator('#playscope').textContent()).toContain('Alto');
+});
+
+test('transport scope label reflects all-parts vs a soloed voice', async ({ page }) => {
+  await loadSATB(page);
+  expect(await page.locator('#playscope').textContent()).toContain('all parts');
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Solo', exact: true }).click();
+  await page.waitForTimeout(150);
+  const label = await page.locator('#playscope').textContent();
+  expect(label).toContain('Soprano');
+  expect(label).not.toContain('all parts');
+});
+
+// ---- click-to-seek on engraved sheets ----
+
+test('clicking a notehead on a per-part sheet seeks the playhead', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voice .voicebox .sheetnote').length >= 4, null, { timeout: 8000 });
+  // SATB soprano = quarter notes at beats 0,1,2,3; click the one at beat 2
+  await page.locator('.voice', { hasText: 'Soprano' }).locator('.voicebox .sheetnote[data-b0="2.0000"]').click();
+  await page.waitForFunction(() => /beat 2/.test(document.getElementById('posdisp').textContent || ''), null, { timeout: 5000 });
+  expect(await page.locator('#posdisp').textContent()).toContain('beat 2');
+});
+
+test('clicking a notehead on the full score seeks the playhead', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#tabs .tab', { hasText: 'Full score' }).click();
+  await page.locator('#rendersheet').click();
+  await page.waitForFunction(() => document.querySelectorAll('#sheet .sheetnote[data-b0="3.0000"]').length > 0, null, { timeout: 8000 });
+  await page.locator('#sheet .sheetnote[data-b0="3.0000"]').first().click();
+  await page.waitForFunction(() => /beat 3/.test(document.getElementById('posdisp').textContent || ''), null, { timeout: 5000 });
+  expect(await page.locator('#posdisp').textContent()).toContain('beat 3');
+});
