@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rudiments — Interactive Theory Course</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Bravura — the free SMuFL music font (SIL OFL). Used for clefs, noteheads, accidentals. */
+  @font-face{
+    font-family:"Bravura";
+    src:url("https://cdn.jsdelivr.net/gh/steinbergmedia/bravura/redist/woff/Bravura.woff") format("woff");
+    font-display:swap;
+  }
+  :root{
+    --paper:#f4efe6; --paper2:#ece5d8; --ink:#211c16; --muted-text:#736959;
+    --accent:#8c2f2a; --accent2:#2f6b5f;
+    --line:rgba(33,28,22,0.12); --line2:rgba(33,28,22,0.22);
+    --good:#2f6b5f; --bad:#8c2f2a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--paper);color:var(--ink);font-family:"Newsreader",Georgia,serif}
+  body{
+    min-height:100vh;padding:40px 20px 80px;
+    background-image:linear-gradient(rgba(140,47,42,0.025) 1px,transparent 1px);
+    background-size:100% 32px;
+  }
+  .wrap{max-width:760px;margin:0 auto}
+  header{text-align:center;border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:26px;position:relative}
+  header::after{content:"";position:absolute;left:0;right:0;bottom:-6px;height:1px;background:var(--ink)}
+  h1{font-family:"Fraunces",serif;font-weight:900;font-size:clamp(30px,6vw,48px);letter-spacing:-0.02em;line-height:0.95}
+  .sub{font-style:italic;color:var(--muted-text);font-size:15px;margin-top:10px}
+  .panel{background:var(--paper2);border:1px solid var(--line2);border-radius:10px;padding:18px 20px;margin-bottom:20px}
+  label{font-family:"Fraunces",serif;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--accent);display:block;margin-bottom:8px}
+  .seg{display:inline-flex;border:1px solid var(--line2);border-radius:6px;overflow:hidden;flex-wrap:wrap}
+  .seg button{font-family:"Newsreader",serif;font-size:14px;background:var(--paper);border:none;padding:8px 14px;cursor:pointer;color:var(--muted-text);border-right:1px solid var(--line2)}
+  .seg button:last-child{border-right:none}
+  .seg button.on{background:var(--accent);color:var(--paper)}
+  .seg button:hover:not(.on){background:var(--paper2)}
+  .controls{display:flex;gap:26px 40px;flex-wrap:wrap}
+  .qcard{min-height:120px}
+  .prompt{font-family:"Fraunces",serif;font-weight:600;font-size:clamp(19px,3.2vw,24px);line-height:1.3;margin-bottom:6px}
+  .lessontag{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted-text);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:14px}
+  .stage{display:flex;justify-content:center;margin:18px 0}
+  svg.stave{background:var(--paper);border:1px solid var(--line);border-radius:8px;touch-action:none}
+  .answers{margin-top:16px}
+  .choices{display:flex;flex-direction:column;gap:10px}
+  .choice{font-family:"Newsreader",serif;font-size:17px;text-align:left;background:var(--paper);border:1px solid var(--line2);border-radius:8px;padding:12px 16px;cursor:pointer;color:var(--ink);transition:all .12s}
+  .choice:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px)}
+  .choice:disabled{cursor:default;opacity:0.85}
+  .choice.correct{border-color:var(--good);background:rgba(47,107,95,0.12)}
+  .choice.wrong{border-color:var(--bad);background:rgba(140,47,42,0.10)}
+  .textrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  input[type=text]{font-family:"JetBrains Mono",monospace;font-size:17px;background:var(--paper);border:1px solid var(--line2);border-radius:8px;padding:11px 14px;color:var(--ink);min-width:200px;flex:1}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  .btn{font-family:"Fraunces",serif;font-weight:600;font-size:16px;background:var(--ink);color:var(--paper);border:none;padding:11px 24px;border-radius:8px;cursor:pointer;transition:transform .1s,background .2s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn.accent{background:var(--accent)}
+  .btn:disabled{opacity:0.4;cursor:default;transform:none}
+  .ghost{font-family:"Newsreader",serif;font-style:italic;font-size:14px;background:transparent;border:1px solid var(--line2);border-radius:20px;padding:6px 16px;cursor:pointer;color:var(--muted-text)}
+  .ghost:hover{border-color:var(--accent);color:var(--accent)}
+  .accbar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+  .accbar .lab{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted-text)}
+  .accbtn{font-family:"Bravura";font-size:22px;line-height:1;width:40px;height:40px;background:var(--paper);border:1px solid var(--line2);border-radius:6px;cursor:pointer;color:var(--ink);display:flex;align-items:center;justify-content:center}
+  .accbtn.on{background:var(--accent);color:var(--paper)}
+  .feedback{margin-top:16px;font-size:16px;line-height:1.5;padding:14px 16px;border-radius:8px;border:1px solid var(--line2);background:var(--paper)}
+  .feedback.good{border-color:var(--good);background:rgba(47,107,95,0.08)}
+  .feedback.bad{border-color:var(--bad);background:rgba(140,47,42,0.07)}
+  .feedback .verdict{font-family:"Fraunces",serif;font-weight:700;font-size:17px}
+  .feedback .verdict.good{color:var(--good)}
+  .feedback .verdict.bad{color:var(--bad)}
+  .feedback .expl{font-style:italic;color:var(--muted-text);margin-top:6px}
+  .footer{display:flex;justify-content:space-between;align-items:center;margin-top:18px;flex-wrap:wrap;gap:12px}
+  .score{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--muted-text)}
+  .score b{color:var(--ink)}
+  .hint{font-style:italic;color:var(--muted-text);font-size:13px;margin-top:8px}
+  .metertag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:0.02em;color:var(--muted-text);background:var(--paper);border:1px solid var(--line2);border-radius:14px;padding:3px 12px;margin:2px 0 12px}
+  .fmthint{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted-text);margin-top:8px}
+  .fmthint b{color:var(--accent);font-weight:500}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Rudiments of Music</h1>
+    <div class="sub">An interactive course, after Cuthbert Harris (1921) — endless practice, your pace.</div>
+  </header>
+
+  <div class="panel">
+    <div class="controls">
+      <div>
+        <label>Topic</label>
+        <div class="seg" id="topicSeg"></div>
+      </div>
+      <div>
+        <label>Difficulty</label>
+        <div class="seg" id="diffSeg"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="qcard">
+      <div class="lessontag" id="lessontag"></div>
+      <div class="prompt" id="prompt"></div>
+      <div class="metertag" id="metertag" hidden></div>
+      <div class="stage" id="stage" hidden></div>
+      <div class="answers" id="answers"></div>
+      <div class="feedback" id="feedback" hidden></div>
+    </div>
+    <div class="footer">
+      <div class="score" id="score"></div>
+      <button class="btn accent" id="nextBtn">Next question →</button>
+    </div>
+  </div>
+  <div class="hint">Type answers in any reasonable form — e.g. <code>maj 3</code>, <code>M3</code> or <code>major 3rd</code> all work; <code>Eb</code> or <code>E flat</code> for notes.</div>
+</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Rudiments of Music — interactive course
+   Architecture: pure-logic core + generators + one state->render UI.
+   No framework, no build step: open the file or serve it, it runs.
+   --------------------------------------------------------------------------
+   SECTIONS
+     1. RNG + small helpers
+     2. Music-theory core (notes, intervals, note values)
+     3. SVG stave (render + click-to-pitch)
+     4. Generators (note values, note-naming, intervals)
+     5. Registry + difficulty
+     6. UI controller (state -> render)
+   ========================================================================= */
+
+/* ---- 1. RNG + helpers --------------------------------------------------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function makeRng(seed){
+  const r=mulberry32(seed>>>0);
+  return {
+    next:r,
+    int:(lo,hi)=>lo+Math.floor(r()*(hi-lo+1)),          // inclusive
+    pick:(arr)=>arr[Math.floor(r()*arr.length)],
+    bool:(p=0.5)=>r()<p,
+    shuffle:(arr)=>{const a=arr.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(r()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;},
+    sample:(arr,n)=>{const a=arr.slice();const out=[];for(let k=0;k<n&&a.length;k++){out.push(a.splice(Math.floor(r()*a.length),1)[0]);}return out;}
+  };
+}
+
+/* ---- 2. Music-theory core ----------------------------------------------- */
+const LETTERS=["C","D","E","F","G","A","B"];
+const LETTER_PC={C:0,D:2,E:4,F:5,G:7,A:9,B:11};   // pitch-class of the natural letter
+const ACC_OFFSET={"bb":-2,"b":-1,"":0,"#":1,"x":2};
+const ACC_NAME={"bb":"double flat","b":"flat","":"","#":"sharp","x":"double sharp"};
+// SMuFL glyph codepoints (Bravura)
+const GLYPH={
+  gClef:"", fClef:"", cClef:"",
+  noteheadWhole:"",
+  flat:"", natural:"", sharp:"", dblSharp:"", dblFlat:""
+};
+const ACC_GLYPH={"bb":GLYPH.dblFlat,"b":GLYPH.flat,"":GLYPH.natural,"#":GLYPH.sharp,"x":GLYPH.dblSharp};
+
+// A note is {letter, acc, octave}.  Helpers below.
+function letterIndex(L){return LETTERS.indexOf(L);}
+function dindex(n){return n.octave*7+letterIndex(n.letter);}            // diatonic ladder
+function semitone(n){return n.octave*12+LETTER_PC[n.letter]+ACC_OFFSET[n.acc];}  // absolute semitone
+function noteName(n,withOctave){return n.letter+(n.acc==="x"?"x":n.acc)+(withOctave?n.octave:"");}
+function prettyNote(n,withOctave){
+  const sym={"bb":"♭♭","b":"♭","":"","#":"♯","x":"𝄪"}[n.acc];
+  return n.letter+sym+(withOctave?n.octave:"");
+}
+function noteFromDindex(d,acc){return {letter:LETTERS[((d%7)+7)%7], acc:acc||"", octave:Math.floor(d/7)};}
+
+// ---- Intervals ----
+// reference (perfect/major) semitone size for each interval number
+const PERFECT_NUMS=new Set([1,4,5,8]);
+const REF_SEMI={1:0,2:2,3:4,4:5,5:7,6:9,7:11,8:12,9:14};
+const QUAL_WORD={P:"perfect",M:"major",m:"minor",A:"augmented",d:"diminished"};
+function ordinal(n){return {1:"unison",2:"2nd",3:"3rd",4:"4th",5:"5th",6:"6th",7:"7th",8:"octave",9:"9th"}[n];}
+function intervalText(q,num){
+  if(num===1&&q==="P")return "perfect unison";
+  if(num===8&&q==="P")return "perfect octave";
+  return QUAL_WORD[q]+" "+ordinal(num);
+}
+// classify the interval between two notes (lower assumed <= upper in pitch)
+function classifyInterval(lo,hi){
+  let num=dindex(hi)-dindex(lo)+1;                 // letter distance + 1
+  const semis=semitone(hi)-semitone(lo);
+  const baseNum=((num-1)%7)+1;                      // fold to within-octave for quality
+  const ref=REF_SEMI[baseNum];
+  const diff=semis-(ref + 12*Math.floor((num-1)/7));
+  let q;
+  if(PERFECT_NUMS.has(baseNum)){
+    q={"-1":"d","0":"P","1":"A"}[String(diff)]||(diff<0?"d":"A");
+  }else{
+    q={"-2":"d","-1":"m","0":"M","1":"A"}[String(diff)]||(diff<-1?"d":"A");
+  }
+  return {q,num,semis,text:intervalText(q,num)};
+}
+// build the upper note for (lower note, quality, number)
+function buildInterval(lo,q,num){
+  const upD=dindex(lo)+(num-1);
+  const baseNum=((num-1)%7)+1;
+  let target=REF_SEMI[baseNum]+12*Math.floor((num-1)/7);
+  const adj=PERFECT_NUMS.has(baseNum)
+    ? {P:0,A:1,d:-1}[q]
+    : {M:0,m:-1,A:1,d:-2}[q];
+  target+=adj;
+  const upSemiAbs=semitone(lo)+target;
+  const nat=noteFromDindex(upD,"");                 // natural note on that letter/octave
+  const accOff=upSemiAbs-semitone(nat);
+  const acc=Object.keys(ACC_OFFSET).find(k=>ACC_OFFSET[k]===accOff);
+  if(acc===undefined)return null;                   // would need triple accidental — skip
+  return {letter:nat.letter,acc,octave:nat.octave};
+}
+function invertNumber(num){return 9-(((num-1)%7)+1);}  // within an octave
+function invertQuality(q){return {P:"P",M:"m",m:"M",A:"d",d:"A"}[q];}
+
+// ---- Note values ----  (relative to a semibreve = 4 beats)
+const NOTE_VALUES=[
+  {name:"semibreve",beats:4},
+  {name:"minim",beats:2},
+  {name:"crotchet",beats:1},
+  {name:"quaver",beats:0.5},
+  {name:"semiquaver",beats:0.25},
+  {name:"demisemiquaver",beats:0.125}
+];
+function dotMul(dots){return dots===2?1.75:dots===1?1.5:1;}
+function valBeats(nv,dots){return nv.beats*dotMul(dots);}
+
+/* ---- 3. SVG stave: render + click-to-pitch ------------------------------ */
+const SVGNS="http://www.w3.org/2000/svg";
+// clef config: which diatonic index sits on the staff's BOTTOM line, + where the clef glyph anchors
+const CLEFS={
+  treble:{glyph:GLYPH.gClef, bottomLineD:dindex({letter:"E",acc:"",octave:4}), clefLineFromTop:3},
+  bass:  {glyph:GLYPH.fClef, bottomLineD:dindex({letter:"G",acc:"",octave:2}), clefLineFromTop:1},
+  alto:  {glyph:GLYPH.cClef, bottomLineD:dindex({letter:"F",acc:"",octave:3}), clefLineFromTop:2},
+  tenor: {glyph:GLYPH.cClef, bottomLineD:dindex({letter:"D",acc:"",octave:3}), clefLineFromTop:1}
+};
+const GAP=12, STEP=GAP/2, STAFF_TOP=46, NOTE_FONT=4*GAP;
+function el(tag,attrs){const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+function lineY(fromTop){return STAFF_TOP+fromTop*GAP;}        // 0..4 top->bottom
+function bottomLineY(){return lineY(4);}
+function noteY(clefKey,n){return bottomLineY()-(dindex(n)-CLEFS[clefKey].bottomLineD)*STEP;}
+function yToDindex(clefKey,y){
+  const d=CLEFS[clefKey].bottomLineD+Math.round((bottomLineY()-y)/STEP);
+  return d;
+}
+
+// Render a stave into a container. opts: {clef, notes:[{letter,acc,octave,ghost?}], width}
+function renderStave(container,opts){
+  container.innerHTML="";
+  const width=opts.width||360, height=150;
+  const svg=el("svg",{class:"stave",width,height,viewBox:`0 0 ${width} ${height}`});
+  // staff lines
+  for(let i=0;i<5;i++)svg.appendChild(el("line",{x1:14,y1:lineY(i),x2:width-14,y2:lineY(i),stroke:"#211c16","stroke-width":1,opacity:0.85}));
+  // clef
+  const cf=CLEFS[opts.clef];
+  const clef=el("text",{x:20,y:lineY(cf.clefLineFromTop),"font-family":"Bravura","font-size":NOTE_FONT,fill:"#211c16"});
+  clef.textContent=cf.glyph; svg.appendChild(clef);
+  // notes
+  const startX=70, dx=Math.min(70,(width-100)/Math.max(1,opts.notes.length));
+  (opts.notes||[]).forEach((n,i)=>{
+    const x=(n.x!=null)?n.x:startX+i*dx, y=noteY(opts.clef,n);
+    drawLedgers(svg,x,y,width);
+    if(n.acc&&n.acc!==""){
+      const a=el("text",{x:x-16,y,"font-family":"Bravura","font-size":NOTE_FONT,fill:n.ghost?"#9a8f7d":"#211c16"});
+      a.textContent=ACC_GLYPH[n.acc]; svg.appendChild(a);
+    }
+    const head=el("text",{x,y,"font-family":"Bravura","font-size":NOTE_FONT,fill:n.ghost?"#9a8f7d":"#211c16"});
+    head.textContent=GLYPH.noteheadWhole; svg.appendChild(head);
+  });
+  container.appendChild(svg);
+  return svg;
+}
+function drawLedgers(svg,x,y,width){
+  const lw=18;
+  for(let yy=lineY(0)-GAP;yy>=y-0.5;yy-=GAP)svg.appendChild(el("line",{x1:x-2,y1:yy,x2:x+lw,y2:yy,stroke:"#211c16","stroke-width":1}));
+  for(let yy=bottomLineY()+GAP;yy<=y+0.5;yy+=GAP)svg.appendChild(el("line",{x1:x-2,y1:yy,x2:x+lw,y2:yy,stroke:"#211c16","stroke-width":1}));
+}
+
+// Interactive placement. opts:{clef, given:[notes], acc():current accidental, onPlace(note)}
+function attachPlacement(container,opts){
+  const width=360;
+  let placed=null;
+  function draw(){
+    const notes=(opts.given||[]).slice();
+    if(placed)notes.push(Object.assign({},placed));
+    const svg=renderStave(container,{clef:opts.clef,notes,width});
+    const hit=el("rect",{x:120,y:6,width:width-134,height:138,fill:"transparent",style:"cursor:crosshair"});
+    svg.appendChild(hit);
+    svg.addEventListener("click",onClick);
+  }
+  function onClick(ev){
+    const svg=container.querySelector("svg");
+    const r=svg.getBoundingClientRect();
+    const x=ev.clientX-r.left, y=ev.clientY-r.top;
+    if(x<120)return;                                   // ignore clicks on the clef area
+    let d=yToDindex(opts.clef,y);
+    d=Math.max(CLEFS[opts.clef].bottomLineD-7,Math.min(CLEFS[opts.clef].bottomLineD+13,d));
+    const base=noteFromDindex(d,"");
+    const px=Math.max(160,Math.min(width-40,x));       // render the note under the cursor
+    placed={letter:base.letter,acc:opts.acc(),octave:base.octave,x:px};
+    draw();
+    opts.onPlace(placed);
+  }
+  draw();
+  return {getPlaced:()=>placed, setAcc:()=>{if(placed){placed.acc=opts.acc();draw();opts.onPlace(placed);}}};
+}
+
+/* ---- 4. Generators ------------------------------------------------------ */
+/* Each Question:
+   {topic, lesson, difficulty, answerType:'mc'|'text'|'write',
+    prompt, stimulus?, choices?, answer, expectedText, grade(input)->bool, explanation}      */
+
+function ordWord(n){return ordinal(n);}
+
+// --- 4a. Note values (Lessons III–IV) ---
+const NV_LESSON="Lessons III–IV · Notes, rests & dots";
+// The beat unit is meter-dependent. Questions that talk in "beats" carry an explicit, swappable
+// label saying what = one beat. Simple time here means a crotchet beat; compound-time lessons
+// (VI–VIII) will set a different basis (e.g. a dotted crotchet) or omit it.
+const SIMPLE_BEAT_NOTE="Simple time · a crotchet = 1 beat";
+function genNoteValues(diff,rng){
+  if(diff===1)return nvRecall(rng);
+  if(diff===2)return nvApply(rng);
+  if(diff===3)return nvBuild(rng);
+  return nvMaster(rng);
+}
+// L1 — Recall: several templates so it never feels like one question with the numbers swapped.
+function nvRecall(rng){
+  const t=rng.int(0,3);
+  if(t===0){
+    // beats relative to a crotchet = 1 beat
+    const nv=rng.pick(NOTE_VALUES.slice(0,5));
+    const ans=valBeats(nv,0);
+    const pool=Array.from(new Set([ans,ans*2,ans/2,ans+1,ans+2].filter(v=>v>0&&v<=8)));
+    const choices=rng.shuffle(ensureN([ans,...rng.shuffle(pool.filter(v=>v!==ans))],4,()=>rng.pick([0.25,0.5,1,2,3,4,6,8]))).map(fmtBeats);
+    return baseQ({topic:"values",lesson:NV_LESSON,difficulty:1,answerType:"mc",
+      prompt:`How many beats is a ${nv.name} worth?`,
+      choices, answer:fmtBeats(ans), expectedText:fmtBeats(ans), meterNote:SIMPLE_BEAT_NOTE,
+      explanation:`A crotchet = 1 beat, so a ${nv.name} is worth ${fmtBeats(ans)}.`});
+  }
+  if(t===1||t===2){
+    const longest=t===1;
+    const picks=rng.sample(NOTE_VALUES.slice(0,6),3);
+    const ans=picks.slice().sort((a,b)=>longest?b.beats-a.beats:a.beats-b.beats)[0];
+    return baseQ({topic:"values",lesson:NV_LESSON,difficulty:1,answerType:"mc",
+      prompt:`Which of these notes is the ${longest?"longest":"shortest"}?`,
+      choices:rng.shuffle(picks.map(p=>cap(p.name))), answer:cap(ans.name), expectedText:cap(ans.name),
+      explanation:`Order by length: ${[...picks].sort((a,b)=>b.beats-a.beats).map(p=>p.name).join(" > ")}. The ${longest?"longest":"shortest"} is the ${ans.name}.`});
+  }
+  // adjacent halving relationship, as MC
+  const i=rng.int(0,4), big=NOTE_VALUES[i], small=NOTE_VALUES[i+1];
+  const ans=valBeats(big,0)/valBeats(small,0); // always 2
+  return baseQ({topic:"values",lesson:NV_LESSON,difficulty:1,answerType:"mc",
+    prompt:`How many ${small.name}s make one ${big.name}?`,
+    choices:rng.shuffle(["2","3","4","1"]), answer:"2", expectedText:"2",
+    explanation:`Each note is twice the one below it, so two ${small.name}s = one ${big.name}.`});
+}
+// L2 — Apply: count smaller notes in a larger (possibly non-adjacent).
+function nvApply(rng){
+  const i=rng.int(0,3), j=rng.int(i+1,Math.min(i+3,5));
+  const big=NOTE_VALUES[i], small=NOTE_VALUES[j];
+  const ans=valBeats(big,0)/valBeats(small,0);
+  return baseQ({topic:"values",lesson:NV_LESSON,difficulty:2,answerType:"text",
+    prompt:`How many ${small.name}s are there in a ${big.name}?`,
+    answer:String(ans), expectedText:fmtCount(ans), grade:(s)=>parseNum(s)===ans,
+    format:"a number — e.g. 4, 1/2 or four",
+    explanation:`Each note divides into two of the next smaller, so a ${big.name} = ${fmtCount(ans)} ${small.name}s. (This ratio is the same in every time signature.)`});
+}
+// L3 — Build: name the single (possibly dotted) note worth a given value. A real "construct the note" task.
+function nvBuild(rng){
+  const dotted=rng.bool(0.6);
+  const i=rng.int(0,3), big=NOTE_VALUES[i];
+  const beats=valBeats(big,dotted?1:0);
+  const expected=(dotted?"dotted ":"")+big.name;
+  const unit=rng.pick(NOTE_VALUES.filter(n=>n.beats<big.beats&&Number.isInteger(beats/n.beats)));
+  const inUnit=beats/unit.beats;
+  return baseQ({topic:"values",lesson:NV_LESSON,difficulty:3,answerType:"text",
+    prompt:`Which single note is worth ${fmtCount(inUnit)} ${unit.name}s? ${dotted?"(it will need a dot)":""}`.trim(),
+    answer:expected, expectedText:expected,
+    grade:(s)=>{const t=norm(s);return t.includes(big.name)&&(/\bdot/.test(t)===dotted);},
+    format:"a note name — e.g. minim or dotted crotchet",
+    explanation:`${dotted?"A dot adds half the note's own value, so a":"A"} ${expected} lasts as long as ${fmtCount(inUnit)} ${unit.name}s.`});
+}
+// L4 — Master: double-dotted arithmetic (fractional answers like 3.5 / "three and a half").
+function nvMaster(rng){
+  const i=rng.int(0,2), big=NOTE_VALUES[i], small=NOTE_VALUES[i+1];
+  const dots=rng.pick([2,2,1]);
+  const ans=valBeats(big,dots)/valBeats(small,0);
+  const dword=dots===2?"double-dotted":"dotted";
+  return baseQ({topic:"values",lesson:NV_LESSON,difficulty:4,answerType:"text",
+    prompt:`How many ${small.name}s are there in a ${dword} ${big.name}?`,
+    answer:String(ans), expectedText:fmtCount(ans), grade:(s)=>parseNum(s)===ans,
+    format:"a number — e.g. 3 1/2 or 7/2",
+    explanation:`${dots===2?"Two dots add three-quarters of the note's own value":"A dot adds half the note's own value"}, so a ${dword} ${big.name} lasts as long as ${fmtCount(ans)} ${small.name}s.`});
+}
+function cap(s){return s.charAt(0).toUpperCase()+s.slice(1);}
+function ensureN(arr,n,gen){const s=[];for(const v of arr){if(!s.includes(v))s.push(v);if(s.length>=n)break;}let guard=0;while(s.length<n&&guard++<50){const v=gen();if(!s.includes(v))s.push(v);}return s.slice(0,n);}
+// Display helpers — show fractions (1/2, 1/4, 1 1/2) rather than decimals.
+function toFrac(v){
+  if(Number.isInteger(v))return String(v);
+  const whole=Math.floor(v), frac=+(v-whole).toFixed(3);
+  const map={0.5:"1/2",0.25:"1/4",0.75:"3/4",0.125:"1/8",0.375:"3/8",0.625:"5/8",0.875:"7/8"};
+  const fs=map[frac]||String(frac);
+  return whole>0?whole+" "+fs:fs;
+}
+function beatsWord(v){return v===1?"1 beat":toFrac(v)+(v<1?" beat":" beats");}   // "1/2 beat", "2 beats"
+function fmtBeats(v){return v===1?"1 beat":Number.isInteger(v)?v+" beats":toFrac(v)+" of a beat";}
+function fmtCount(v){return toFrac(v);}                                            // for "how many" answers
+const WORDNUM={zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16};
+// Accept digits, decimals, number-words, fractions ("1/2", "3 1/2", "7/2"), and unit words
+// ("four semiquavers", "2 beats", "three and a half").
+function parseNum(s){
+  let t=String(s||"").trim().toLowerCase();
+  t=t.replace(/\bof a beat\b/g," ")
+     .replace(/\b(beats?|notes?)\b/g," ")
+     .replace(/\b(semibreves?|minims?|crotchets?|quavers?|semiquavers?|demisemiquavers?)\b/g," ")
+     .replace(/\s+/g," ").trim();
+  if(!t)return NaN;
+  if(/^-?\d+(\.\d+)?$/.test(t))return parseFloat(t);
+  const f=t.match(/^(?:(\d+)\s+)?(\d+)\s*\/\s*(\d+)$/);            // "3/4", "3 1/2"
+  if(f)return (f[1]?+f[1]:0)+(+f[2])/(+f[3]);
+  if(/^(a |one )?half$/.test(t))return 0.5;
+  if(/^(a )?quarter$/.test(t))return 0.25;
+  if(/^three quarters$/.test(t))return 0.75;
+  if(/^(an? )?eighth$/.test(t))return 0.125;
+  const m=t.match(/^([a-z]+|\d+) and (?:a |one )?(half|quarter|three quarters)$/);
+  if(m){
+    const whole=/^\d+$/.test(m[1])?parseInt(m[1],10):WORDNUM[m[1]];
+    if(whole==null)return NaN;
+    return whole+(m[2]==="half"?0.5:m[2]==="quarter"?0.25:0.75);
+  }
+  if(t in WORDNUM)return WORDNUM[t];
+  return NaN;
+}
+
+// --- 4b. Note-naming on the staff (Lessons I–II) ---
+function pickStaffNote(clefKey,rng,leger,withAcc){
+  const c=CLEFS[clefKey];
+  const lo=c.bottomLineD-(leger?3:0), hi=c.bottomLineD+8+(leger?3:0);
+  const d=rng.int(lo,hi);
+  const n=noteFromDindex(d,"");
+  if(withAcc)n.acc=rng.pick(["","","#","b"]);
+  return n;
+}
+function genNoteNaming(diff,rng){
+  const lesson="Lessons I–II · Clefs & leger lines";
+  if(diff===1){
+    const clef="treble"; const n=pickStaffNote(clef,rng,false,false);
+    const choices=rng.shuffle(uniqueLetters(n.letter,rng,4));
+    return baseQ({topic:"naming",lesson,difficulty:diff,answerType:"mc",
+      prompt:"Name this note.",
+      stimulus:{clef,notes:[n]}, choices, answer:n.letter, expectedText:n.letter,
+      explanation:`On the treble staff this sits on ${describePosition(clef,n)}, which is ${n.letter}.`});
+  }
+  if(diff===2){
+    const clef=rng.pick(["treble","bass"]); const n=pickStaffNote(clef,rng,true,false);
+    return baseQ({topic:"naming",lesson,difficulty:diff,answerType:"text",
+      prompt:`Name this note (just the letter).`,
+      stimulus:{clef,notes:[n]}, answer:n.letter, expectedText:n.letter,
+      grade:(s)=>norm(s).charAt(0).toUpperCase()===n.letter,
+      format:"the letter name — e.g. F",
+      explanation:`This is ${n.letter} on the ${clef} staff.`});
+  }
+  if(diff===3){
+    // write: place a named note
+    const clef=rng.pick(["treble","bass"]); const n=pickStaffNote(clef,rng,false,false);
+    return baseQ({topic:"naming",lesson,difficulty:diff,answerType:"write",
+      prompt:`Place ${n.letter}${n.octave} on the ${clef} staff.`,
+      stimulus:{clef,given:[],placeOctaveMatters:true}, answer:noteName(n,true), expectedText:noteName(n,true),
+      grade:(p)=>p&&p.letter===n.letter&&p.octave===n.octave&&(p.acc===""||p.acc===n.acc),
+      format:"click the staff to place the note (the ♮ ♯ ♭ buttons set the accidental)",
+      explanation:`${n.letter}${n.octave} sits on ${describePosition(clef,n)}.`});
+  }
+  // diff 4: alto/tenor clef or accidental
+  const clef=rng.pick(["alto","tenor","treble","bass"]);
+  const n=pickStaffNote(clef,rng,true,true);
+  return baseQ({topic:"naming",lesson,difficulty:diff,answerType:"text",
+    prompt:`Name this note, including any accidental.`,
+    stimulus:{clef,notes:[n]}, answer:prettyNote(n,false), expectedText:prettyNote(n,false),
+    grade:(s)=>matchNoteName(s,n),
+    format:"letter + accidental — e.g. F# or Bb",
+    explanation:`On the ${clef} staff this is ${prettyNote(n,false)}.`});
+}
+function uniqueLetters(correct,rng,k){const s=new Set([correct]);while(s.size<k)s.add(rng.pick(LETTERS));return Array.from(s);}
+function describePosition(clef,n){
+  const yfromBottom=(dindex(n)-CLEFS[clef].bottomLineD);
+  if(yfromBottom<0)return "a leger line below the staff";
+  if(yfromBottom>8)return "a leger line above the staff";
+  return yfromBottom%2===0?`line ${yfromBottom/2+1}`:`a space`;
+}
+
+// --- 4c. Intervals (Lessons XIII–XIV) ---
+function genIntervals(diff,rng){
+  const lesson="Lessons XIII–XIV · Intervals";
+  const clef=diff>=4?rng.pick(["treble","bass"]):"treble";
+  if(diff===1){
+    // MC: name a major/perfect diatonic interval above C-ish naturals
+    const lo=pickStaffNote(clef,rng,false,false); lo.acc="";
+    const num=rng.pick([2,3,4,5,6,8]);
+    const q=PERFECT_NUMS.has(num)?"P":"M";
+    const hi=buildInterval(lo,q,num); if(!hi)return genIntervals(diff,rng);
+    const info=classifyInterval(lo,hi);
+    const choices=rng.shuffle(intervalChoices(info,rng));
+    return baseQ({topic:"intervals",lesson,difficulty:diff,answerType:"mc",
+      prompt:"Name this interval.",
+      stimulus:{clef,notes:[lo,hi]}, choices, answer:info.text, expectedText:info.text,
+      explanation:`${prettyNote(lo)} up to ${prettyNote(hi)} spans ${ordWord(num)} letter-names — a ${info.text}.`});
+  }
+  if(diff===2){
+    // text: name interval, include minors
+    const lo=pickStaffNote(clef,rng,false,false); lo.acc="";
+    const num=rng.pick([2,3,4,5,6,7]);
+    const q=PERFECT_NUMS.has(num)?"P":rng.pick(["M","m"]);
+    const hi=buildInterval(lo,q,num); if(!hi)return genIntervals(diff,rng);
+    const info=classifyInterval(lo,hi);
+    return baseQ({topic:"intervals",lesson,difficulty:diff,answerType:"text",
+      prompt:"Name this interval (quality + number).",
+      stimulus:{clef,notes:[lo,hi]}, answer:info.text, expectedText:info.text,
+      grade:(s)=>matchInterval(s,info),
+      format:"quality + number — e.g. major 3rd, m3 or P5",
+      explanation:`This is a ${info.text} (${info.semis} semitones).`});
+  }
+  if(diff===3){
+    // write: build an interval above a given note
+    const lo=pickStaffNote(clef,rng,false,false); lo.acc=rng.pick(["","","#","b"]);
+    const num=rng.pick([2,3,4,5,6]);
+    const q=PERFECT_NUMS.has(num)?"P":rng.pick(["M","m"]);
+    const hi=buildInterval(lo,q,num); if(!hi)return genIntervals(diff,rng);
+    if(hi.acc==="x"||hi.acc==="bb")return genIntervals(diff,rng);   // staff can't place double accidentals
+    const info=classifyInterval(lo,hi);
+    return baseQ({topic:"intervals",lesson,difficulty:diff,answerType:"write",
+      prompt:`Build a ${info.text} above ${prettyNote(lo)} — place the upper note.`,
+      stimulus:{clef,given:[lo],placeOctaveMatters:true}, answer:noteName(hi,true), expectedText:prettyNote(hi,true),
+      grade:(p)=>p&&p.letter===hi.letter&&p.octave===hi.octave&&p.acc===hi.acc,
+      format:"click the staff to place the upper note (the ♮ ♯ ♭ buttons set the accidental)",
+      explanation:`A ${info.text} above ${prettyNote(lo)} is ${prettyNote(hi,true)}.`});
+  }
+  // diff 4: augmented/diminished naming, or inversion
+  if(rng.bool()){
+    const lo=pickStaffNote(clef,rng,false,false); lo.acc=rng.pick(["","#","b"]);
+    const num=rng.pick([2,3,4,5,6,7]);
+    const q=PERFECT_NUMS.has(num)?rng.pick(["P","A","d"]):rng.pick(["M","m","A","d"]);
+    const hi=buildInterval(lo,q,num); if(!hi)return genIntervals(diff,rng);
+    const info=classifyInterval(lo,hi);
+    return baseQ({topic:"intervals",lesson,difficulty:diff,answerType:"text",
+      prompt:"Name this interval (it may be augmented or diminished).",
+      stimulus:{clef,notes:[lo,hi]}, answer:info.text, expectedText:info.text,
+      grade:(s)=>matchInterval(s,info),
+      format:"quality + number — e.g. aug 4, d5 or major 6th",
+      explanation:`${prettyNote(lo)} to ${prettyNote(hi)} is a ${info.text}.`});
+  }else{
+    const num=rng.pick([2,3,4,5,6,7]);
+    const q=PERFECT_NUMS.has(num)?"P":rng.pick(["M","m"]);
+    const invN=invertNumber(num), invQ=invertQuality(q);
+    return baseQ({topic:"intervals",lesson,difficulty:diff,answerType:"text",
+      prompt:`A ${intervalText(q,num)}, when inverted, becomes which interval?`,
+      answer:intervalText(invQ,invN), expectedText:intervalText(invQ,invN),
+      grade:(s)=>matchInterval(s,{q:invQ,num:invN,text:intervalText(invQ,invN)}),
+      format:"quality + number — e.g. minor 6th or m6",
+      explanation:`Inverting swaps the quality and the numbers add to nine: a ${intervalText(q,num)} becomes a ${intervalText(invQ,invN)}.`});
+  }
+}
+function intervalChoices(info,rng){
+  const set=new Set([info.text]);
+  const nums=[info.num-1,info.num+1,info.num].filter(n=>n>=1&&n<=8);
+  while(set.size<4){
+    const n=rng.pick(nums);
+    const q=PERFECT_NUMS.has(((n-1)%7)+1)?rng.pick(["P","A","d"]):rng.pick(["M","m","A","d"]);
+    set.add(intervalText(q,n));
+  }
+  return Array.from(set);
+}
+
+/* ---- answer parsing / matching ---- */
+function norm(s){return String(s||"").trim().toLowerCase();}
+function matchNoteName(s,n){
+  const t=norm(s).replace(/\s+/g,"").replace(/♯/g,"#").replace(/𝄪/g,"x").replace(/♭/g,"b").replace(/♮/g,"");
+  const accStr={"bb":"(bb|doubleflat)","b":"(b|flat)","":"(natural|nat)?","#":"(#|sharp)","x":"(x|##|doublesharp)"}[n.acc];
+  const re=new RegExp("^"+n.letter.toLowerCase()+accStr+"\\d?$");
+  return re.test(t);
+}
+function matchInterval(s,info){
+  const p=parseInterval(s);
+  if(!p)return false;
+  return p.q===info.q&&p.num===info.num;
+}
+function parseInterval(s){
+  let t=String(s).trim();
+  // short forms like M3, m3, P5, A4, d5, +4, o5
+  let m=t.match(/^([PpMmAdo+])\s*(\d+)$/);
+  let q=null,num=null;
+  if(m){
+    const c=m[1];
+    q=({P:"P",p:"P",M:"M",m:"m",A:"A","+":"A",d:"d",o:"d"})[c]||null;
+    num=parseInt(m[2],10);
+  }else{
+    const tl=t.toLowerCase();
+    if(/\bperfect\b|\bperf\b/.test(tl))q="P";
+    else if(/\bmajor\b|\bmaj\b/.test(tl))q="M";
+    else if(/\bminor\b|\bmin\b/.test(tl))q="m";
+    else if(/\baugmented\b|\baug\b/.test(tl))q="A";
+    else if(/\bdiminished\b|\bdim\b/.test(tl))q="d";
+    if(/\bunison\b/.test(tl))num=1;
+    else if(/\boctave\b|\b8ve\b/.test(tl))num=8;
+    else{const dm=tl.match(/(\d+)/);if(dm)num=parseInt(dm[1],10);}
+  }
+  if(q&&num)return {q,num};
+  return null;
+}
+
+function baseQ(o){
+  if(!o.grade){
+    if(o.answerType==="mc")o.grade=(s)=>norm(s)===norm(o.answer);
+    else o.grade=(s)=>norm(s)===norm(o.answer);
+  }
+  return o;
+}
+
+/* ---- 5. Registry + difficulty ------------------------------------------- */
+const TOPICS=[
+  {id:"values",   label:"Note values", gen:genNoteValues,  tiers:[1,2,3,4]},
+  {id:"naming",   label:"Notes on staff", gen:genNoteNaming, tiers:[1,2,3,4]},
+  {id:"intervals",label:"Intervals",   gen:genIntervals,   tiers:[1,2,3,4]},
+  {id:"mixed",    label:"Mixed",        gen:null,           tiers:[1,2,3,4]}
+];
+const DIFFS=[{n:1,label:"Recall"},{n:2,label:"Apply"},{n:3,label:"Construct"},{n:4,label:"Edge"}];
+function generate(topicId,diff,rng){
+  if(topicId==="mixed"){
+    const t=rng.pick(TOPICS.filter(t=>t.gen));
+    return t.gen(diff,rng);
+  }
+  return TOPICS.find(t=>t.id===topicId).gen(diff,rng);
+}
+
+/* ---- 6. UI controller --------------------------------------------------- */
+const state={
+  topic:"values", diff:1, seed:(Date.now()>>>0), q:null, answered:false,
+  currentAcc:"", placed:null,
+  stats:loadStats()
+};
+function loadStats(){try{return JSON.parse(localStorage.getItem("rudiments.stats"))||{};}catch(e){return {};}}
+function saveStats(){try{localStorage.setItem("rudiments.stats",JSON.stringify(state.stats));}catch(e){}}
+function statKey(){return state.topic+":"+state.diff;}
+function bumpStat(correct){
+  const k=statKey();const s=state.stats[k]||{seen:0,correct:0,streak:0};
+  s.seen++; if(correct){s.correct++;s.streak++;}else s.streak=0;
+  state.stats[k]=s; saveStats();
+}
+
+const $=(id)=>document.getElementById(id);
+function buildSegments(){
+  const ts=$("topicSeg"); ts.innerHTML="";
+  TOPICS.forEach(t=>{const b=document.createElement("button");b.textContent=t.label;b.className=state.topic===t.id?"on":"";
+    b.onclick=()=>{state.topic=t.id;buildSegments();newQuestion();};ts.appendChild(b);});
+  const ds=$("diffSeg"); ds.innerHTML="";
+  DIFFS.forEach(d=>{const b=document.createElement("button");b.textContent=d.n+" · "+d.label;b.className=state.diff===d.n?"on":"";
+    b.onclick=()=>{state.diff=d.n;buildSegments();newQuestion();};ds.appendChild(b);});
+}
+
+function newQuestion(){
+  state.seed=(state.seed*1664525+1013904223)>>>0;
+  const rng=makeRng(state.seed);
+  state.q=generate(state.topic,state.diff,rng);
+  state.answered=false; state.currentAcc=""; state.placed=null;
+  render();
+}
+
+function render(){
+  const q=state.q;
+  $("lessontag").textContent=q.lesson;
+  $("prompt").textContent=q.prompt;
+  const mt=$("metertag");
+  if(q.meterNote){mt.hidden=false;mt.textContent=q.meterNote;}else mt.hidden=true;
+  // stimulus
+  const stage=$("stage");
+  if(q.stimulus&&q.answerType!=="write"){
+    stage.hidden=false;
+    renderStave(stage,{clef:q.stimulus.clef,notes:q.stimulus.notes||[],width:360});
+  }else if(q.answerType==="write"){
+    stage.hidden=false; stage.innerHTML="";
+    // accidental bar
+    const bar=document.createElement("div");bar.className="accbar";
+    const lab=document.createElement("span");lab.className="lab";lab.textContent="accidental:";bar.appendChild(lab);
+    [["",""],["#",""],["b",""]].forEach(([acc,g])=>{
+      const btn=document.createElement("button");btn.className="accbtn"+(state.currentAcc===acc?" on":"");
+      btn.style.fontFamily="Bravura";btn.textContent=g;
+      btn.onclick=()=>{state.currentAcc=acc;bar.querySelectorAll(".accbtn").forEach(x=>x.classList.remove("on"));btn.classList.add("on");if(ph)ph.setAcc();};
+      bar.appendChild(btn);
+    });
+    stage.appendChild(bar);
+    const sv=document.createElement("div");stage.appendChild(sv);
+    var ph=attachPlacement(sv,{clef:q.stimulus.clef,given:q.stimulus.given||[],acc:()=>state.currentAcc,onPlace:(n)=>{state.placed=n;}});
+  }else stage.hidden=true;
+  // answers
+  renderAnswers();
+  // feedback
+  $("feedback").hidden=true;
+  $("score").innerHTML=scoreLine();
+  $("nextBtn").textContent="Next question →";
+}
+
+function renderAnswers(){
+  const q=state.q, box=$("answers"); box.innerHTML="";
+  if(q.answerType==="mc"){
+    const wrap=document.createElement("div");wrap.className="choices";
+    q.choices.forEach(c=>{
+      const b=document.createElement("button");b.className="choice";b.textContent=c;
+      b.onclick=()=>{if(state.answered)return;submit(c,b);};
+      wrap.appendChild(b);
+    });
+    box.appendChild(wrap);
+  }else if(q.answerType==="text"){
+    const row=document.createElement("div");row.className="textrow";
+    const inp=document.createElement("input");inp.type="text";inp.id="answerInput";
+    inp.placeholder=q.format?q.format.split(" — ")[1]||q.format:"your answer…";
+    inp.onkeydown=(e)=>{if(e.key==="Enter"&&!state.answered)submit(inp.value);};
+    const b=document.createElement("button");b.className="btn";b.textContent="Check";
+    b.onclick=()=>{if(!state.answered)submit(inp.value);};
+    row.appendChild(inp);row.appendChild(b);box.appendChild(row);
+    if(q.format){const h=document.createElement("div");h.className="fmthint";h.innerHTML="Answer as <b>"+escapeHtml(q.format)+"</b>";box.appendChild(h);}
+    setTimeout(()=>inp.focus(),30);
+  }else if(q.answerType==="write"){
+    const row=document.createElement("div");row.className="textrow";
+    const b=document.createElement("button");b.className="btn";b.textContent="Check placement";
+    b.onclick=()=>{if(!state.answered)submit(state.placed);};
+    row.appendChild(b);box.appendChild(row);
+    if(q.format){const h=document.createElement("div");h.className="fmthint";h.innerHTML="How: <b>"+escapeHtml(q.format)+"</b>";box.appendChild(h);}
+  }
+}
+
+function submit(input,btnEl){
+  if(state.answered)return;
+  state.answered=true;
+  const q=state.q;
+  const correct=!!q.grade(input);
+  bumpStat(correct);
+  // mc visual
+  if(q.answerType==="mc"){
+    $("answers").querySelectorAll(".choice").forEach(b=>{
+      b.disabled=true;
+      if(norm(b.textContent)===norm(q.answer))b.classList.add("correct");
+      else if(b===btnEl)b.classList.add("wrong");
+    });
+  }else{
+    $("answers").querySelectorAll("input,button").forEach(x=>x.disabled=true);
+  }
+  showFeedback(correct);
+  $("score").innerHTML=scoreLine();
+}
+
+function showFeedback(correct){
+  const q=state.q, fb=$("feedback");
+  fb.hidden=false;
+  fb.className="feedback "+(correct?"good":"bad");
+  let userTxt="";
+  fb.innerHTML=
+    `<span class="verdict ${correct?"good":"bad"}">${correct?"Correct":"Not quite"}</span>`+
+    (correct?"":` — the answer is <b>${escapeHtml(q.expectedText)}</b>.`)+
+    `<div class="expl">${escapeHtml(q.explanation)}</div>`;
+}
+
+function scoreLine(){
+  const s=state.stats[statKey()]||{seen:0,correct:0,streak:0};
+  const pct=s.seen?Math.round(100*s.correct/s.seen):0;
+  return `This level: <b>${s.correct}</b>/<b>${s.seen}</b> (${pct}%) · streak <b>${s.streak}</b>`;
+}
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+$("nextBtn").onclick=newQuestion;
+buildSegments();
+newQuestion();
+</script>
+</body>
+</html>

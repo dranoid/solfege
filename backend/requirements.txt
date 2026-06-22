@@ -1,0 +1,9 @@
+# Core web service (needed for either engine)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9   # required for file uploads (UploadFile)
+
+# Optional: the oemer engine (OMR_ENGINE=oemer).
+# Leave commented if you're using Audiveris (the default). oemer pulls in
+# onnxruntime/opencv and is happiest on Python 3.11.
+# oemer>=0.1.7

@@ -1,0 +1,38 @@
+I'm building a web app that takes a photo/screenshot of sheet music and plays it
+back as singing (ahh/ooh/mmm vowels) while showing movable-do solfège (do re mi)
+above each note. I have a working frontend prototype and want to keep building.
+
+ARCHITECTURE DECISION (already made):
+- I am NOT building optical music recognition (OMR) from scratch — it's a hard
+  CV/ML problem. The input boundary for my own code is MusicXML.
+- Plan: a backend service (FastAPI) wrapping an open-source OMR engine —
+  oemer or homr (Python, pip-installable) or Audiveris (Java) — exposing
+  POST /transcribe that takes an image and returns MusicXML. The frontend
+  consumes that MusicXML.
+
+CURRENT STATE (single-file HTML + Tone.js prototype, working):
+- Manual note entry ("C4 D4 E4", "F#5", durations like "G4:8", "R" for rests)
+  plus a key selector.
+- Solfège computed as ((notePitchClass - tonicPitchClass) mod 12) → lookup in
+  ["Do","Di","Re","Ri","Mi","Fa","Fi","Sol","Si","La","Li","Ti"].
+- Playback via Tone.js: a PolySynth (sawtooth) routed through three parallel
+  bandpass filters tuned to vowel formant frequencies (ahh ~730/1090/2440 Hz,
+  ooh ~300/870/2240), with vibrato. "mmm" uses a sine + lower formants.
+- Notes triggered in real time via setTimeout (so Stop reliably halts them);
+  active note is highlighted in sync.
+- Basic MusicXML import: parses <note> pitch/octave/alter/type and <key><fifths>,
+  but only grabs the first note of each beat (skips <chord> notes), so it follows
+  the top line, not a true per-voice split.
+
+WHAT I WANT TO BUILD NEXT (pick up here):
+1. The FastAPI OMR backend (oemer or homr first; Audiveris as a fallback),
+   with image upload → MusicXML, and the frontend calling it.
+2. Proper per-voice MusicXML parsing using <voice> and <staff> so I can solo or
+   mute Soprano/Alto/Tenor/Bass independently (my real input is SATB hymns).
+3. Key-aware chromatic solfège spelling (Ra/Me/Se/Le/Te for lowered notes vs
+   Di/Ri/Fi/Si/Li for raised) instead of always using the raised names.
+4. (Stretch) swap the formant synth for sampled "ahh" choir notes for a more
+   convincing voice, e.g. via Tone.Sampler.
+
+I'll paste my current index.html. Help me set up the backend and improve the
+parser. Ask me anything you need about my setup (OS, Python vs Java, deploy target).

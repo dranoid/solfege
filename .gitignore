@@ -1,0 +1,34 @@
+# ---- Node / Playwright ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# ---- Python (backend) ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- Secrets / local config ----
+# Keep .env.example tracked; ignore the real, machine-specific .env
+.env
+.env.local
+!.env.example
+
+# ---- User-supplied audio assets (CC0 choir samples dropped in by the user) ----
+samples/choir/*.mp3
+samples/choir/*.wav
+samples/choir/*.ogg
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
