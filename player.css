@@ -124,6 +124,11 @@
   .editparts .epart:first-child{border-top:none;padding-top:0}
   .epart-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
   .epart-head input{font-family:"Fraunces",serif;font-weight:600;font-size:15px;color:var(--accent2);background:var(--paper);border:1px solid var(--line2);border-radius:6px;padding:5px 9px;width:150px}
+  .epart-count{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted-text)}
+  .epart-count.suspect{color:var(--accent);font-weight:600}
+  .editparts .epart.suspect{background:rgba(140,47,42,0.05);border-radius:8px}
+  .editnote{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:rgba(140,47,42,0.06);border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:6px;padding:9px 12px;margin-bottom:14px}
+  .editnote span{flex:1;min-width:220px;font-style:italic;font-size:13px;color:var(--ink)}
   .delpart{margin-left:auto;font-size:12px}
   .echips{display:flex;flex-wrap:wrap;gap:6px}
   .echip{min-width:52px;text-align:center;padding:7px 6px 8px;border-radius:8px;border:1px solid var(--line2);background:var(--paper);cursor:pointer;transition:all .12s}

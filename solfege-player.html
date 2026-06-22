@@ -164,8 +164,12 @@
           </div>
         </div>
         <button class="ghost" id="edNew" data-icon="file-plus">New piece</button>
+        <button class="ghost" id="edSATB" data-icon="file-plus">New SATB</button>
         <button class="ghost" id="edAddPart" data-icon="plus">Add part</button>
         <button class="ghost" id="edUndo" title="Undo (Cmd/Ctrl+Z)">Undo</button>
+        <button class="ghost" id="edSaveProj" data-icon="download">Save project</button>
+        <button class="ghost" id="edOpenProj">Open project</button>
+        <input type="file" id="projfile" accept=".json,.solfege.json" hidden>
         <span class="hint" id="editmsg">Click a note to edit it. Changes apply live to the player and the preview below.</span>
       </div>
       <div id="editparts" class="editparts"></div>

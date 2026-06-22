@@ -128,6 +128,17 @@ function labelTracks(arr){
   return arr;
 }
 
+// Pitched-note count for a track, and which tracks look like OMR slips: very
+// short streams sitting alongside substantial ones. This is ADVISORY ONLY -- we
+// never drop anything automatically; the editor flags these so the user decides.
+function pitchedCount(t){ return (t.notes || []).filter(n=> !n.isRest).length; }
+function suspectParts(){
+  const counts = tracks.map(pitchedCount);
+  const max = Math.max(0, ...counts);
+  if(max < 8) return [];                       // nothing substantial yet (e.g. a brand-new piece)
+  return tracks.filter(t=> pitchedCount(t) <= 2);
+}
+
 function parseParts(doc){
   const parts = [...doc.querySelectorAll('part')];
   const map = new Map();
@@ -561,6 +572,7 @@ function contentChanged(){
   dirty = true; computeEndBeat();
   if(isPlaying) stopPlayback();
   else { Tone.Transport.seconds = 0; updatePos(0); }
+  autosave();
 }
 
 /* ---------- export ---------- */
@@ -1092,14 +1104,31 @@ function renderEditor(){
     wrap.innerHTML = '<p class="hint">Nothing to edit yet. Load a file or type a melody above, or click <b>New piece</b> to start a blank one.</p>';
     renderNoteEditor(); return;
   }
+  // Flag likely OMR slips (very short parts) so the user can review and remove
+  // them by hand. Nothing is ever deleted automatically.
+  const suspects = suspectParts();
+  const suspectIds = new Set(suspects.map(s=> s.id));
+  if(suspects.length){
+    const notice = document.createElement('div'); notice.className = 'editnote';
+    const span = document.createElement('span');
+    span.textContent = `${suspects.length} very short part(s) flagged below, often OMR slips. Check them, then keep or remove (this is undoable).`;
+    const btn = document.createElement('button'); btn.className = 'ghost'; btn.textContent = `Remove ${suspects.length} flagged part(s)`;
+    btn.onclick = ()=>{ pushUndo(); tracks = tracks.filter(t=> !suspectIds.has(t.id)); if(editSel && suspectIds.has(editSel.trackId)) editSel = null; afterEdit(); };
+    notice.append(span, btn);
+    wrap.append(notice);
+  }
   tracks.forEach(t=>{
-    const part = document.createElement('div'); part.className = 'epart';
+    const part = document.createElement('div'); part.className = 'epart' + (suspectIds.has(t.id) ? ' suspect' : '');
     const head = document.createElement('div'); head.className = 'epart-head';
     const name = document.createElement('input'); name.type = 'text'; name.value = t.label || ''; name.placeholder = 'Part name'; name.title = 'Rename this part';
     name.oninput = ()=>{ t.label = name.value; render(); scheduleEditPreview(); };
+    const pc = pitchedCount(t);
+    const count = document.createElement('span'); count.className = 'epart-count' + (suspectIds.has(t.id) ? ' suspect' : '');
+    count.textContent = pc === 1 ? '1 note' : pc + ' notes';
+    if(suspectIds.has(t.id)) count.title = 'Very short, likely an OMR slip. Keep it or delete it.';
     const del = document.createElement('button'); del.className = 'ghost delpart'; del.textContent = 'Delete part';
     del.onclick = ()=>{ pushUndo(); tracks = tracks.filter(x=> x !== t); if(editSel && editSel.trackId === t.id) editSel = null; afterEdit(); };
-    head.append(name, del);
+    head.append(name, count, del);
     part.append(head);
     const chips = document.createElement('div'); chips.className = 'echips';
     t.notes.forEach((n,i)=>{
@@ -1154,7 +1183,7 @@ function renderNoteEditor(){
   panel.querySelector('#neDelete').onclick = ()=>{ pushUndo(); t.notes.splice(i, 1); editSel = t.notes.length ? {trackId:t.id, index:Math.min(i, t.notes.length-1)} : null; afterEdit(); };
 }
 
-function scheduleEditPreview(){ clearTimeout(editPreviewTimer); editPreviewTimer = setTimeout(renderEditPreview, 250); }
+function scheduleEditPreview(){ clearTimeout(editPreviewTimer); editPreviewTimer = setTimeout(renderEditPreview, 250); autosave(); }
 async function renderEditPreview(){
   const box = document.getElementById('editsheet'); if(!box) return;
   if(!window.opensheetmusicdisplay){ box.innerHTML = '<p class="hint" style="margin:6px">Sheet renderer not loaded.</p>'; editOsmd = null; return; }
@@ -1177,16 +1206,76 @@ function addPart(){
 }
 
 // Phase 4: start a blank piece from scratch (one part, one note, ready to build on).
-function newPiece(){
-  if(hasMusic() && !confirm('Start a new blank piece? This clears the current one.')) return;
+// Start a fresh piece from a list of parts ({label, note?}). The note's pitch
+// fields are recomputed by reflow, so specs only need step/alter/oct/durBeat.
+function startPiece(partsSpec){
+  if(hasMusic() && !confirm('Start a new piece? This clears the current one.')) return;
   pushUndo();
   pieceName = ''; lastXML = ''; transposeOffset = 0; edited = true;
   meterBeats = 4; meterType = 4; setKey(0, 'C');   // sensible defaults: C major, 4/4
-  tracks = [{id:'t0', label:'Voice 1', enabled:true, solo:false, vol:1, notes:[ defaultNote(null) ]}];
+  tracks = partsSpec.map((s,i)=> ({id:'t'+i, label:s.label, enabled:true, solo:false, vol:1, notes:[ s.note || defaultNote(null) ]}));
   soloActive = false; editSel = {trackId:'t0', index:0};
   afterEdit();
   switchTab('edit');
   const tEl = document.getElementById('edTitle'); if(tEl){ tEl.value = ''; tEl.focus(); }
+}
+function newPiece(){ startPiece([{label:'Voice 1'}]); }
+// One-click SATB: four empty voices at sensible starting octaves.
+function newSATB(){ startPiece([
+  {label:'Soprano', note:{isRest:false, step:'C', alter:0, oct:5, durBeat:1}},
+  {label:'Alto',    note:{isRest:false, step:'A', alter:0, oct:4, durBeat:1}},
+  {label:'Tenor',   note:{isRest:false, step:'E', alter:0, oct:4, durBeat:1}},
+  {label:'Bass',    note:{isRest:false, step:'C', alter:0, oct:3, durBeat:1}},
+]); }
+
+/* ---------- persistence ----------
+   Autosave the working piece to localStorage (so a refresh never loses it), and
+   let the user save/open a portable .solfege.json project capturing the full
+   editor state (notes + meter + key + tempo + title). */
+const SESSION_KEY = 'solfege-player-session';
+let autosaveTimer = 0;
+
+function sessionState(){
+  return {
+    v: 1, tracks, meterBeats, meterType, pieceName, transposeOffset,
+    tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter,
+    bpm: parseInt(document.getElementById('bpm').value) || 84,
+  };
+}
+function autosave(){
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(()=>{ try{ localStorage.setItem(SESSION_KEY, JSON.stringify(sessionState())); }catch(_){} }, 600);
+}
+// Apply a saved state object to the app. Returns false if it carries no notes.
+function restoreState(s){
+  if(!s || !Array.isArray(s.tracks) || !s.tracks.length) return false;
+  tracks = s.tracks;
+  meterBeats = s.meterBeats || 4; meterType = s.meterType || 4;
+  pieceName = s.pieceName || ''; transposeOffset = s.transposeOffset || 0;
+  edited = true; lastXML = ''; soloActive = false; editSel = null;
+  tracks.forEach(t=>{ if(t.vol === undefined) t.vol = 1; if(t.enabled === undefined) t.enabled = true; });
+  if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
+  if(s.bpm) setTempo(s.bpm);
+  invalidateSheets(); render(); contentChanged();
+  return true;
+}
+function restoreSession(){
+  try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? restoreState(JSON.parse(raw)) : false; }
+  catch(_){ return false; }
+}
+function saveProject(){
+  const m = document.getElementById('editmsg');
+  if(!hasMusic()){ if(m) m.textContent = 'Nothing to save yet.'; return; }
+  downloadBlob(new Blob([JSON.stringify(sessionState())], {type:'application/json'}), safeName(pieceName || 'project') + '.solfege.json');
+  if(m) m.textContent = 'Project saved.';
+}
+function openProject(file){
+  const r = new FileReader();
+  r.onload = ()=>{
+    try{ if(restoreState(JSON.parse(r.result))){ autosave(); switchTab('player'); } else alert('That file has no parts to open.'); }
+    catch(e){ alert('Could not open project: ' + e.message); }
+  };
+  r.readAsText(file);
 }
 
 // Show a tab by name (and refresh the editor when entering it).
@@ -1201,7 +1290,11 @@ function switchTab(view){
 function enterReviewMode(){
   editSel = tracks.length ? {trackId: tracks[0].id, index: 0} : null;
   switchTab('edit');
-  const ban = document.getElementById('omrbanner'); if(ban) ban.hidden = false;
+  const ban = document.getElementById('omrbanner');
+  if(!ban) return;
+  const span = ban.querySelector('span');
+  if(span) span.textContent = 'Transcribed from your image. OMR is not perfect: review each part (very short ones are flagged as likely slips), fix any wrong notes, then send it to the player.';
+  ban.hidden = false;
 }
 function setMeterFromUI(){
   pushUndo();
@@ -1312,8 +1405,12 @@ document.querySelectorAll('#tabs .tab').forEach(b=> b.addEventListener('click', 
 document.getElementById('omrDone').addEventListener('click', ()=> switchTab('player'));
 // Editor controls
 document.getElementById('edNew').addEventListener('click', newPiece);
+document.getElementById('edSATB').addEventListener('click', newSATB);
 document.getElementById('edAddPart').addEventListener('click', addPart);
 document.getElementById('edUndo').addEventListener('click', undo);
+document.getElementById('edSaveProj').addEventListener('click', saveProject);
+document.getElementById('edOpenProj').addEventListener('click', ()=> document.getElementById('projfile').click());
+document.getElementById('projfile').addEventListener('change', e=>{ if(e.target.files[0]) openProject(e.target.files[0]); e.target.value = ''; });
 document.getElementById('edBeats').addEventListener('change', setMeterFromUI);
 document.getElementById('edBeatType').addEventListener('change', setMeterFromUI);
 document.getElementById('edTitle').addEventListener('input', e=>{ pieceName = e.target.value; scheduleEditPreview(); });
@@ -1330,6 +1427,7 @@ document.getElementById('bpm').addEventListener('input', e=>{
   document.getElementById('bpmval').textContent = e.target.value;
   if(isPlaying){ const beat = Tone.Transport.seconds / bs; buildPart(); Tone.Transport.seconds = beat * bs; }  // keep position, new tempo
   else dirty = true;
+  autosave();
 });
 // Keyboard transport (ignored while typing in a field)
 document.addEventListener('keydown', e=>{
@@ -1347,7 +1445,7 @@ document.addEventListener('keydown', e=>{
   else if(e.code==='ArrowRight'){ e.preventDefault(); step(1); }
   else if(e.code==='ArrowLeft'){ e.preventDefault(); step(-1); }
 });
-keySel.addEventListener('change', ()=>{ syncTonicFromSel(); render(); });
+keySel.addEventListener('change', ()=>{ syncTonicFromSel(); render(); autosave(); });
 document.getElementById('notes').addEventListener('input', buildManual);
 document.getElementById('parsebtn').addEventListener('click', buildManual);
 document.getElementById('xmlbtn').addEventListener('click', ()=>{ pieceName=''; loadMusicXMLText(document.getElementById('xml').value.trim(), document.getElementById('xmlmsg')); });
@@ -1402,4 +1500,5 @@ document.querySelectorAll('#timbre button').forEach(b=>b.addEventListener('click
 // buttons (carets, play/pause) set their icon in JS where their state changes.
 document.querySelectorAll('[data-icon]').forEach(el=> el.insertAdjacentHTML('afterbegin', icon(el.dataset.icon)));
 
-buildManual();
+// Restore the last working piece if there is one; otherwise the default melody.
+if(!restoreSession()) buildManual();

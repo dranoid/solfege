@@ -67,7 +67,7 @@ def _friendly_audiveris(output: str):
     """Turn known Audiveris failure signatures into actionable messages."""
     low = output.lower()
     if "interline" in low or "resolution is too low" in low or "flagged as invalid" in low:
-        return ("Image resolution too low for OMR — Audiveris needs roughly 300 DPI "
+        return ("Image resolution too low for OMR. Audiveris needs roughly 300 DPI "
                 "(staff lines were too close together). This is almost always a "
                 "screenshot; use a higher-resolution scan or the source PDF instead.")
     if "no installed ocr" in low:

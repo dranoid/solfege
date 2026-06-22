@@ -355,14 +355,46 @@ test('Phase 5: a transcription lands in the editor behind a review banner', asyn
   expect(await page.locator('#omrbanner').isVisible()).toBe(false);
 });
 
-test('Phase 5: OMR failure shows a helpful message (and does not crash)', async ({ page }) => {
-  await page.route('**/transcribe', (route) => route.fulfill({ status: 422, contentType: 'text/plain', body: 'Image resolution too low for OMR' }));
-  await page.evaluate(() => transcribePhoto(new File(['x'], 'lowres.png', { type: 'image/png' }), document.getElementById('photomsg')));
-  await page.waitForTimeout(200);
+test('Phase 5: a failed (low-res) picture is handled gracefully through the real UI', async ({ page }) => {
+  // Mock the backend rejecting a low-res image, exactly as Audiveris does below ~300 DPI.
+  await page.route('**/transcribe', (route) => route.fulfill({
+    status: 422, contentType: 'application/json',
+    body: JSON.stringify({ detail: 'Image resolution too low for OMR. Audiveris needs roughly 300 DPI.' }),
+  }));
+  // Choose a picture through the actual file input + Transcribe button (not via internals).
+  await page.locator('summary', { hasText: 'Transcribe a photo' }).click();   // open the <details>
+  await page.setInputFiles('#photo', { name: 'lowres.png', mimeType: 'image/png', buffer: Buffer.from('not-a-real-image') });
+  await page.click('#photobtn');
+  await page.waitForFunction(() => /Could not transcribe/.test(document.getElementById('photomsg').textContent || ''), null, { timeout: 10000 });
   const msg = await page.locator('#photomsg').textContent();
   expect(msg).toContain('Could not transcribe');
-  expect(msg).toMatch(/New piece|by hand/);
-  expect(await page.locator('#omrbanner').isVisible()).toBe(false);
+  expect(msg).toMatch(/New piece|by hand/);              // points to the manual-build fallback
+  expect(await page.locator('#omrbanner').isVisible()).toBe(false);   // no review banner on failure
+  expect(await page.locator('#view-player').isVisible()).toBe(true);  // stayed put, did not crash
+  expect(page.errors).toEqual([]);
+});
+
+test('OMR import keeps every voice; editor flags short ones for review (no auto-delete)', async ({ page }) => {
+  // A part with two real voices (10 notes each) + two 1-note "voices", times two parts = 8 streams.
+  const note = (s, o, v) => `<note><pitch><step>${s}</step><octave>${o}</octave></pitch><duration>1</duration><voice>${v}</voice><type>quarter</type></note>`;
+  const rep = (s, o, v, n) => Array.from({ length: n }, () => note(s, o, v)).join('');
+  const part = (id) => `<part id="${id}"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>${rep('C', 5, 1, 10)}${rep('E', 4, 2, 10)}${note('G', 4, 3)}${note('A', 4, 4)}</measure></part>`;
+  const xml = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>V</part-name></score-part><score-part id="P2"><part-name>V</part-name></score-part></part-list>${part('P1')}${part('P2')}</score-partwise>`;
+
+  const n = await page.evaluate((x) => { loadMusicXMLText(x, document.getElementById('xmlmsg')); return tracks.length; }, xml);
+  expect(n).toBe(8);   // every voice survives import; nothing is dropped automatically
+
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.waitForTimeout(200);
+  expect(await page.locator('.epart.suspect').count()).toBe(4);          // the four 1-note voices flagged
+  expect(await page.locator('.editnote').isVisible()).toBe(true);
+
+  // removal is user-initiated and undoable
+  await page.locator('.editnote button').click();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => tracks.length)).toBe(4);
+  await page.locator('#edUndo').click();
+  expect(await page.evaluate(() => tracks.length)).toBe(8);
 });
 
 test('editor: edits flow through to the player sheet (serializer, not stale import)', async ({ page }) => {
@@ -378,4 +410,50 @@ test('editor: edits flow through to the player sheet (serializer, not stale impo
   await page.locator('.voice', { hasText: 'Soprano' }).getByRole('button', { name: 'Sheet', exact: true }).click();
   await page.waitForTimeout(1500);
   expect(await page.locator('.voice', { hasText: 'Soprano' }).locator('.voicebox svg').count()).toBeGreaterThan(0);
+});
+
+// ---- SATB template + persistence ----
+
+test('New SATB: creates four named voices', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.locator('#edSATB').click();
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => tracks.map((t) => t.label))).toEqual(['Soprano', 'Alto', 'Tenor', 'Bass']);
+});
+
+test('persistence: the working piece survives a page reload', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.locator('#edNew').click();
+  await page.fill('#edTitle', 'PersistMe');
+  await page.locator('.epart').first().locator('.echip.addchip').click(); // 2 notes
+  await page.waitForTimeout(900); // let the 600ms autosave debounce flush
+  await page.reload();
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => pieceName)).toBe('PersistMe');
+  expect(await page.evaluate(() => tracks.length)).toBe(1);
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(2);
+});
+
+test('project: Save downloads a .solfege.json and Open restores it', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+  await page.locator('#tabs .tab', { hasText: 'Edit' }).click();
+  await page.locator('#edSATB').click();
+  await page.fill('#edTitle', 'ProjTest');
+  await page.waitForTimeout(300);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#edSaveProj').click()]);
+  expect(dl.suggestedFilename()).toMatch(/\.solfege\.json$/);
+  const fs = require('fs');
+  const path = await dl.path();
+  const json = JSON.parse(fs.readFileSync(path, 'utf8'));
+  expect(json.tracks.length).toBe(4);
+  expect(json.pieceName).toBe('ProjTest');
+  // replace with a different piece, then open the saved file back
+  await page.locator('#edNew').click();
+  expect(await page.evaluate(() => tracks.length)).toBe(1);
+  await page.setInputFiles('#projfile', path);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => tracks.length)).toBe(4);
+  expect(await page.evaluate(() => pieceName)).toBe('ProjTest');
 });

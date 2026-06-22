@@ -26,6 +26,9 @@ samples/choir/*.mp3
 samples/choir/*.wav
 samples/choir/*.ogg
 
+# ---- Local OMR test inputs (hymn PDFs / personal photos), not for the repo ----
+tests/fixtures/
+
 # ---- OS / editor cruft ----
 .DS_Store
 Thumbs.db
