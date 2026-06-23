@@ -10,6 +10,7 @@ const ICON_SVG = {
   'download':     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   'plus':         '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
   'file-plus':    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>',
+  'wrench':       '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
 };
 function icon(name){
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_SVG[name]||''}</svg>`;
@@ -84,7 +85,9 @@ let pieceName = '';   // name of the loaded piece, used to prefix exported files
 let lastXML = '';     // raw MusicXML of the loaded piece (for the sheet-music view)
 let transposeOffset = 0;   // semitones shifted from the file's original key
 let edited = false;        // true once the notes have been edited/built (sheets then come from the serializer, not lastXML)
-let editSel = null;        // {trackId, index} of the note selected in the editor
+let editSel = null;        // {trackId, index} primary/anchor note selected in the editor
+let multiSel = null;       // {trackId, set:Set<index>} when 2+ notes are selected in one part (bulk edit)
+let noteClip = null;       // deep-copied notes on the clipboard (copy/paste within & across parts)
 let meterBeats = 4, meterType = 4;   // piece meter (parsed from imports; editable in the editor)
 
 /* ---------- manual entry ---------- */
@@ -101,6 +104,7 @@ function parseToken(tok){
 }
 
 function buildManual(){
+  exitReview();
   pieceName = ''; lastXML = ''; transposeOffset = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();
   const toks = document.getElementById('notes').value.trim().split(/[\s,]+/).filter(Boolean);
   let beat = 0; const notes = [];
@@ -112,7 +116,6 @@ function buildManual(){
   tracks = [{id:'t0', label:'Melody', enabled:true, solo:false, notes}];
   soloActive = false;
   render();
-  syncEditorView();
   contentChanged();
 }
 
@@ -213,6 +216,7 @@ function readTempo(doc){
 
 function loadMusicXMLText(txt, msgEl){
   try{
+    exitReview();   // a fresh load clears any prior OMR review state (transcribePhoto re-enters it after)
     const doc = new DOMParser().parseFromString(txt, 'application/xml');
     if(doc.querySelector('parsererror')) throw new Error('invalid XML');
     lastXML = txt; transposeOffset = 0; edited = false; resetSheets();   // keep raw XML for the sheet-music view
@@ -224,7 +228,7 @@ function loadMusicXMLText(txt, msgEl){
     const tempo = readTempo(doc); const setT = tempo ? setTempo(tempo) : null;
     const built = parseParts(doc);
     if(!built.length) throw new Error('no notes found');
-    tracks = built; soloActive = false; render(); syncEditorView(); contentChanged();
+    tracks = built; soloActive = false; render(); contentChanged();
     const total = built.reduce((s,t)=> s + t.notes.filter(n=>!n.isRest).length, 0);
     if(msgEl) msgEl.textContent = `Loaded ${built.length} voice(s), ${total} notes${setT ? `, tempo ${setT} bpm` : ''}.`;
     return true;
@@ -244,6 +248,7 @@ async function loadMxl(buf, msgEl){
 
 /* ---------- MIDI ---------- */
 function loadMidi(buf, msgEl){
+  exitReview();
   lastXML = ''; transposeOffset = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();   // MIDI has no original notation; the serializer engraves it
   const MidiCtor = (window.Midi && window.Midi.Midi) ? window.Midi.Midi : window.Midi;
   const midi = new MidiCtor(buf);
@@ -262,7 +267,7 @@ function loadMidi(buf, msgEl){
     setKey(((pc%12)+12)%12, ks.key[0]);
   }
   if(midi.header.tempos && midi.header.tempos[0] && midi.header.tempos[0].bpm) setTempo(midi.header.tempos[0].bpm);
-  tracks = labelTracks(out); soloActive = false; render(); syncEditorView(); contentChanged();
+  tracks = labelTracks(out); soloActive = false; render(); contentChanged();
   if(msgEl) msgEl.textContent = `Loaded ${out.length} track(s) from MIDI. (MIDI carries no sharp/flat spelling, so solfège uses sharps; load MusicXML for exact spelling.)`;
 }
 
@@ -302,14 +307,23 @@ async function transcribePhoto(file, msgEl){
 /* ---------- render ---------- */
 function render(){
   const stave = document.getElementById('stave');
+  // Preserve each part's engraved-staff scroll (live preview / sheet view) across
+  // the rebuild, so editing a note deep in the staff doesn't jump back to the top.
+  stave.querySelectorAll('.voice[data-tid]').forEach(r=>{
+    const box = r.querySelector('.voicebox'), t = trackById(r.dataset.tid);
+    if(box && t) t._previewScroll = box.scrollTop;
+  });
   stave.innerHTML = '';
   const tbar = document.getElementById('transportbar'); if(tbar) tbar.hidden = !tracks.length;
   const tv = document.getElementById('trval'); if(tv) tv.textContent = (transposeOffset>0?'+':'') + transposeOffset;
   const multi = tracks.length > 1;
+  // During OMR review, flag very short parts (likely slips) right on the player rows.
+  const suspectIds = reviewMode ? new Set(suspectParts().map(s=> s.id)) : new Set();
   tracks.forEach(t=>{
     const muted = soloActive ? !t.solo : !t.enabled;
     const row = document.createElement('div');
-    row.className = 'voice' + (muted ? ' muted' : '') + (t.collapsed ? ' collapsed' : '');
+    row.dataset.tid = t.id;   // lets the next render() find this row to restore its staff scroll
+    row.className = 'voice' + (muted ? ' muted' : '') + (t.collapsed ? ' collapsed' : '') + (suspectIds.has(t.id) ? ' suspect' : '');
     if(t.vol === undefined) t.vol = 1;
     if(!t.view) t.view = 'solfa';
     const head = document.createElement('div'); head.className = 'vhead';
@@ -320,7 +334,14 @@ function render(){
     const vplay = document.createElement('button'); vplay.className = 'vplay partplay'; vplay.dataset.tid = t.id;
     vplay.innerHTML = icon('play'); vplay.title = 'Play this part';
     vplay.onclick = ()=> togglePartPlay(t);
+    // label is a span (so the row is still findable by its text); in edit mode it's
+    // contenteditable for in-place renaming. No re-render on input, to keep the caret.
     const lab = document.createElement('span'); lab.className = 'vlabel'; lab.textContent = t.label;
+    if(t.editing){
+      lab.classList.add('vlabel-edit'); lab.contentEditable = 'true'; lab.title = 'Click to rename this part';
+      lab.oninput = ()=>{ t.label = lab.textContent; updatePlayScope(); autosave(); };
+      lab.onkeydown = e=>{ if(e.key === 'Enter'){ e.preventDefault(); lab.blur(); } };
+    }
     // per-part Solfa / Sheet toggle - Sheet needs engravable MusicXML for this voice
     const tog = document.createElement('div'); tog.className = 'vbtns';
     const tSolfa = document.createElement('button'); tSolfa.textContent = 'Solfa'; if(t.view !== 'sheet') tSolfa.classList.add('on');
@@ -329,6 +350,16 @@ function render(){
     if(canSheet(t)){ tSheet.onclick = ()=>{ t.view = 'sheet'; render(); }; }
     else { tSheet.disabled = true; tSheet.style.opacity = '0.4'; tSheet.style.cursor = 'not-allowed'; tSheet.title = 'Sheet needs MusicXML (this part has no engravable notation)'; }
     tog.append(tSolfa, tSheet);
+    // Inline note editing right here in the player - fix a note where you see/hear
+    // it, no tab bounce. Toggles this part's chip strip + note editor under the row.
+    const edit = document.createElement('button'); edit.className = 'vedit' + (t.editing ? ' on' : ''); edit.textContent = 'Edit';
+    edit.title = t.editing ? 'Done editing this part' : 'Edit this part’s notes';
+    edit.onclick = ()=>{
+      t.editing = !t.editing;
+      if(t.editing && !(editSel && editSel.trackId === t.id))
+        editSel = {trackId:t.id, index: Math.max(0, Math.min(editSel ? editSel.index : 0, t.notes.length - 1))};
+      render();
+    };
     const btns = document.createElement('div'); btns.className = 'vbtns vactions';
     if(multi){
       const solo = document.createElement('button'); solo.textContent = 'Solo'; if(t.solo) solo.classList.add('on');
@@ -345,12 +376,25 @@ function render(){
     const png = document.createElement('button'); png.innerHTML=icon('download')+'PNG'; png.title='Download this part’s solfège as an image';
     png.onclick = ()=> exportTrackPng(t);
     btns.append(vol, mp3, png);
-    head.append(caret, vplay, lab, tog, btns);
+    if(t.editing){   // part-level actions live in edit mode (undoable), replacing the old Edit-tab buttons
+      const dup = document.createElement('button'); dup.className = 'duppart'; dup.textContent = 'Duplicate'; dup.title = 'Duplicate this part';
+      dup.onclick = ()=> duplicatePart(t);
+      const del = document.createElement('button'); del.className = 'delpart'; del.textContent = 'Delete part'; del.title = 'Delete this part';
+      del.onclick = ()=>{ pushUndo(); tracks = tracks.filter(x=> x !== t); if(editSel && editSel.trackId === t.id) editSel = null; afterEdit(); };
+      btns.append(dup, del);
+    }
+    head.append(caret, vplay, lab);
+    if(suspectIds.has(t.id)){
+      const sb = document.createElement('span'); sb.className = 'suspectbadge';
+      sb.textContent = 'likely OMR slip'; sb.title = 'Very short part. Fix it, or use the "Remove flagged" button to delete it.';
+      head.append(sb);
+    }
+    head.append(tog, edit, btns);
     row.append(head);
     if(t.view === 'sheet' && canSheet(t)){
       // engraved staff for this one part, themed to the page; cached SVG so solo/mute don't re-render OSMD
       const box = document.createElement('div'); box.className = 'voicebox';
-      if(t._sheetHTML && t._sheetKey === transposeOffset){ box.innerHTML = t._sheetHTML; }
+      if(t._sheetHTML && t._sheetKey === transposeOffset){ box.innerHTML = t._sheetHTML; }   // scroll restored after append (below)
       // OSMD can't measure a hidden (display:none) container, so it would cache a
       // blank staff. Only render while the player view is on screen; switchTab
       // re-renders these when you come back to it.
@@ -359,23 +403,67 @@ function render(){
       row.append(box);
     } else {
       const cells = document.createElement('div'); cells.className = 'stave-row';
+      const selSet = t.editing ? selectionSetFor(t.id) : null;
       t.notes.forEach((n,i)=>{
         const el = document.createElement('div');
-        el.className = 'note' + (n.isRest ? ' rest' : '');
+        const sel = selSet && selSet.has(i);
+        el.className = 'note' + (n.isRest ? ' rest' : '') + (sel ? ' sel' : '');
         el.id = t.id + '-' + i;
-        if(n.isRest){ el.innerHTML = '<span class="solf">–</span><span class="nm">rest</span>'; }
-        else { const a = analyze(n); el.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span><span class="deg">${a.deg}</span>`; }
-        el.title = 'Click to start here';
-        el.addEventListener('click', ()=> seek(n.startBeat, true));   // click-to-seek
+        // in edit mode show the duration (so you can read/fix rhythm); otherwise the scale degree
+        if(n.isRest){ el.innerHTML = `<span class="solf">–</span><span class="nm">rest</span>` + (t.editing ? `<span class="dur">${durAbbr(n.durBeat)}</span>` : ''); }
+        else { const a = analyze(n); el.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span>` + (t.editing ? `<span class="dur">${durAbbr(n.durBeat)}</span>` : `<span class="deg">${a.deg}</span>`); }
+        if(t.editing){ el.title = 'Click to edit · Shift-click to select a run · Cmd/Ctrl-click to toggle'; el.onclick = (e)=> selectChip(t.id, i, n, e); }
+        else { el.title = 'Click to start here'; el.addEventListener('click', ()=> seek(n.startBeat, true)); }  // click-to-seek
         cells.append(el);
       });
+      if(t.editing){
+        const add = document.createElement('div'); add.className = 'note addnote'; add.textContent = '+'; add.title = 'Add a note to the end of this part';
+        add.onclick = ()=>{ pushUndo(); t.notes.push(defaultNote(t.notes[t.notes.length-1])); editSel = {trackId:t.id, index:t.notes.length-1}; afterEdit(); };
+        cells.append(add);
+      }
       row.append(cells);
+    }
+    if(t.editing){
+      // Live engraved preview so you see the note on the staff while you edit the
+      // grid. In sheet view the body staff IS the preview; in solfa view add one.
+      if(t.view !== 'sheet' && canSheet(t)){
+        const cap = document.createElement('div'); cap.className = 'previewcap'; cap.textContent = 'Live preview';
+        const pv = document.createElement('div'); pv.className = 'voicebox editpreview';
+        if(t._sheetHTML && t._sheetKey === transposeOffset){ pv.innerHTML = t._sheetHTML; }   // scroll restored after append (below)
+        else if(playerVisible()){ pv.innerHTML = '<p class="hint" style="margin:4px">Rendering staff…</p>'; renderPartSheet(t, pv); }
+        else { pv.innerHTML = '<p class="hint" style="margin:4px">Staff updates when you open the Player tab.</p>'; }
+        row.append(cap, pv);
+      }
+      // Under the row: a bulk-edit bar when 2+ notes are selected, else the single-note editor.
+      const sel = selectionSetFor(t.id);
+      if(sel.size >= 2){
+        const bb = document.createElement('div'); bb.className = 'noteeditor bulkbar';
+        renderBulkBar(bb, t, sel.size);
+        row.append(bb);
+      } else if(editSel && editSel.trackId === t.id && t.notes[editSel.index]){
+        const ne = document.createElement('div'); ne.className = 'noteeditor';
+        renderNoteEditor(ne);
+        row.append(ne);
+      }
     }
     stave.append(row);
   });
+  // Restore each part's staff scroll now that the rows are in the DOM. (Setting
+  // scrollTop on a detached element is a no-op, so it must happen post-append; the
+  // async renderPartSheet path restores its own once it finishes.)
+  tracks.forEach(t=>{
+    if(!t._previewScroll) return;
+    const r = stave.querySelector('.voice[data-tid="'+t.id+'"]'), box = r && r.querySelector('.voicebox');
+    if(box && box.querySelector('svg')) box.scrollTop = t._previewScroll;   // only when the staff is actually drawn
+  });
   updateMasterView();
   updatePlayScope();   // reflect solo/mute/audition in the transport scope label
+  // keep the Tools fields in step with the current piece (they used to live in the Edit tab)
+  const tEl = document.getElementById('edTitle'); if(tEl && document.activeElement !== tEl) tEl.value = pieceName || '';
+  const bEl = document.getElementById('edBeats'); if(bEl) bEl.value = String(meterBeats);
+  const btEl = document.getElementById('edBeatType'); if(btEl) btEl.value = String(meterType);
   repaintPlayhead();   // keep the paused/playing note lit across re-renders (e.g. solfa<->sheet)
+  repaintSelection();  // outline the selected note on the per-part staff while editing
 }
 
 // Keep the master "Show all parts as" switch honest: highlight Solfa or Sheet
@@ -409,7 +497,6 @@ function transposeBy(delta){
   transposeOffset += delta;
   render();
   retransposeSheets();
-  syncEditorView();
   dirty = true; computeEndBeat(); if(isPlaying) buildPart();
 }
 
@@ -526,12 +613,18 @@ function onsets(){
 
 function paintHighlights(beat){
   const on = new Set(activeTracks().map(t=>t.id));
-  // solfa cells (player) and editor chips (one element each per note)
+  // solfa cells (player) - one element per note, id'd uniquely under #stave
   tracks.forEach(t=> t.notes.forEach((n,i)=>{
     const lit = on.has(t.id) && beat >= n.startBeat-1e-6 && beat < n.startBeat+n.durBeat-1e-6;
     const el = document.getElementById(t.id+'-'+i); if(el) el.classList.toggle('active', lit);
-    const ec = document.getElementById('ec-'+t.id+'-'+i); if(ec) ec.classList.toggle('eplaying', lit);
   }));
+  // editable chips (the Edit tab AND the Player's per-part edit mode) - matched by
+  // data attrs so the same note can be shown in two places without id collisions.
+  document.querySelectorAll('.echip[data-tid]').forEach(c=>{
+    const t = trackById(c.dataset.tid); const n = t && t.notes[+c.dataset.i];
+    const lit = !!n && on.has(t.id) && beat >= n.startBeat-1e-6 && beat < n.startBeat+n.durBeat-1e-6;
+    c.classList.toggle('eplaying', lit);
+  });
   // engraved noteheads (per-part sheets + full score), tagged with their beat window
   document.querySelectorAll('.sheetnote').forEach(el=>{
     const tid = el.dataset.tid;                       // per-part sheets carry a track id; full score does not
@@ -545,6 +638,21 @@ function paintHighlights(beat){
 // while playing or paused. At rest (stopped at 0) nothing is forced on.
 function repaintPlayhead(){
   if(isPlaying || (window.Tone && Tone.Transport.seconds > 1e-6)) paintHighlights(Tone.Transport.seconds / bs);
+}
+// Outline the selected note on any per-part staff (the editable body staff in sheet
+// view, or the live preview in solfa view) so edit selection shows on the engraving
+// too, not just the grid. Noteheads already carry data-tid/data-b0 from tagSheetNotes.
+function repaintSelection(){
+  document.querySelectorAll('#stave .sheetnote.selnote').forEach(el=> el.classList.remove('selnote'));
+  const tid = editSel && editSel.trackId; if(!tid) return;
+  const t = trackById(tid); if(!t || !t.editing) return;
+  // beats of every selected note (the whole multi-selection, not just the anchor)
+  const beats = [...selectionSetFor(tid)].map(i=> t.notes[i]).filter(n=> n && !n.isRest).map(n=> n.startBeat);
+  if(!beats.length) return;
+  document.querySelectorAll('#stave .sheetnote[data-tid="'+tid+'"]').forEach(el=>{
+    const b0 = parseFloat(el.dataset.b0);
+    if(beats.some(b=> Math.abs(b0 - b) < 1e-3)) el.classList.add('selnote');
+  });
 }
 function updatePos(beat){
   const el=document.getElementById('posdisp'); if(el) el.textContent = 'beat ' + beat.toFixed(1);
@@ -675,6 +783,50 @@ function downloadBlob(blob, filename){
   setTimeout(()=> URL.revokeObjectURL(url), 1000);
 }
 
+// Save a blob, asking the user WHERE when the browser supports it (File System
+// Access API, Chromium on https/localhost). Elsewhere (Firefox/Safari) it falls
+// back to the usual auto-download into the Downloads folder. `accept` is optional
+// {desc, mime, ext:[...]} to label the file type in the picker. Returns true if
+// written, false if the user cancelled the picker. Must run in a click handler.
+async function saveBlob(blob, filename, accept){
+  if(window.showSaveFilePicker){
+    try{
+      const opts = { suggestedName: filename };
+      if(accept) opts.types = [{ description: accept.desc, accept: { [accept.mime]: accept.ext } }];
+      const handle = await window.showSaveFilePicker(opts);
+      const w = await handle.createWritable();
+      await w.write(blob); await w.close();
+      return true;
+    }catch(e){
+      if(e && e.name === 'AbortError') return false;   // user cancelled, leave things be
+      // anything else (blocked, insecure context): fall back to a plain download
+    }
+  }
+  downloadBlob(blob, filename);
+  return true;
+}
+
+// For a bulk export ("All parts as …"): ask ONCE for a destination folder instead
+// of prompting per file. Returns a directory handle to write into, 'cancel' if the
+// user dismissed the folder picker, or null when unsupported (caller then falls
+// back to auto-downloading each file into Downloads).
+async function pickExportDir(){
+  if(!window.showDirectoryPicker) return null;
+  try{ return await window.showDirectoryPicker({ mode: 'readwrite' }); }
+  catch(e){ if(e && e.name === 'AbortError') return 'cancel'; return null; }
+}
+async function writeToDir(dir, blob, filename){
+  const h = await dir.getFileHandle(filename, { create: true });
+  const w = await h.createWritable(); await w.write(blob); await w.close();
+}
+// Deliver one exported file to its destination: a directory handle (bulk), the
+// string 'download' (straight to Downloads), or undefined (ask via the picker).
+async function deliver(blob, filename, dest, accept){
+  if(dest && dest.getFileHandle){ await writeToDir(dest, blob, filename); return true; }
+  if(dest === 'download'){ downloadBlob(blob, filename); return true; }
+  return await saveBlob(blob, filename, accept);
+}
+
 // Offline-render a set of parts to a mono AudioBuffer, honouring the current
 // timbre (formant vs choir samples) and each part's volume (as velocity).
 async function renderTracksToBuffer(trackList){
@@ -705,14 +857,17 @@ async function renderTracksToBuffer(trackList){
   }, end + 0.8, 1);   // 1 = mono
 }
 
-// One part -> MP3 (small + shareable on WhatsApp).
-async function exportTrackMp3(track, btn){
+// One part -> MP3 (small + shareable on WhatsApp). `dest`: undefined asks via the
+// picker (single per-part button); a directory handle or 'download' is passed by
+// the export-all loop so it doesn't prompt once per part.
+async function exportTrackMp3(track, btn, dest){
   const original = btn ? btn.innerHTML : '';
   if(!window.lamejs){ alert('MP3 encoder failed to load (check your connection).'); return; }
   if(btn){ btn.textContent = '…'; btn.disabled = true; }
   try{
     const rendered = await renderTracksToBuffer([track]);
-    downloadBlob(audioBufferToMp3(rendered.get()), safeName(exportBase(track)) + '.mp3');
+    const blob = audioBufferToMp3(rendered.get()), name = safeName(exportBase(track)) + '.mp3';
+    await deliver(blob, name, dest, {desc:'MP3 audio', mime:'audio/mpeg', ext:['.mp3']});
   }catch(e){ alert('MP3 export failed: ' + e.message); }
   finally{ if(btn){ btn.innerHTML = original || (icon('download')+'MP3'); btn.disabled = false; } }
 }
@@ -727,7 +882,8 @@ async function exportMixMp3(btn){
   if(btn){ btn.textContent = 'Mixing…'; btn.disabled = true; }
   try{
     const rendered = await renderTracksToBuffer(audible);
-    downloadBlob(audioBufferToMp3(rendered.get()), safeName((pieceName ? pieceName + '-' : '') + 'full-mix') + '.mp3');
+    await saveBlob(audioBufferToMp3(rendered.get()), safeName((pieceName ? pieceName + '-' : '') + 'full-mix') + '.mp3',
+      {desc:'MP3 audio', mime:'audio/mpeg', ext:['.mp3']});
   }catch(e){ alert('Mix export failed: ' + e.message); }
   finally{ if(btn){ btn.innerHTML = original || (icon('download')+'Full mix (MP3)'); btn.disabled = false; } }
 }
@@ -752,23 +908,31 @@ function audioBufferToMp3(buffer, kbps){
 // Export every part, one download after another (no zip).
 async function exportAllMp3(btn){
   if(!tracks.length) return;
+  const dir = await pickExportDir();
+  if(dir === 'cancel') return;                  // user backed out of the folder picker
+  const dest = dir || 'download';               // a folder if picked, else straight to Downloads
   const orig = btn.innerHTML; btn.disabled = true;
-  for(let i=0;i<tracks.length;i++){ btn.textContent = `Rendering ${i+1}/${tracks.length}…`; await exportTrackMp3(tracks[i]); }
+  for(let i=0;i<tracks.length;i++){ btn.textContent = `Rendering ${i+1}/${tracks.length}…`; await exportTrackMp3(tracks[i], null, dest); }
   btn.innerHTML = orig; btn.disabled = false;
 }
 async function exportAllPng(btn){
   if(!tracks.length) return;
+  const dir = await pickExportDir();
+  if(dir === 'cancel') return;
+  const dest = dir || 'download';
   const orig = btn.innerHTML; btn.disabled = true;
   for(let i=0;i<tracks.length;i++){
     btn.textContent = `Saving ${i+1}/${tracks.length}…`;
-    exportTrackPng(tracks[i]);
-    await new Promise(r=> setTimeout(r, 450));   // let each download register before the next
+    await exportTrackPng(tracks[i], dest);
+    if(!dir) await new Promise(r=> setTimeout(r, 450));   // only the download fallback needs a beat between files
   }
   btn.innerHTML = orig; btn.disabled = false;
 }
 
-// Render one part's solfège (+ note names) to a PNG on a canvas.
-function exportTrackPng(track){
+// Render one part's solfège (+ note names) to a PNG on a canvas. `dest`: undefined
+// asks via the picker; a directory handle or 'download' comes from export-all.
+// Returns a promise so the bulk loop can await each file.
+function exportTrackPng(track, dest){
   const notes = track.notes;
   const cw=64, ch=82, padX=18, padTop=44, padBot=18, perRow=Math.min(Math.max(notes.length,1), 16);
   const rows = Math.ceil(notes.length / perRow) || 1;
@@ -791,7 +955,8 @@ function exportTrackPng(track){
       g.fillStyle='#8c2f2a'; g.font='11px "JetBrains Mono", monospace'; g.fillText('deg ' + a.deg, x, y+64);
     }
   });
-  cv.toBlob(b=> downloadBlob(b, safeName(exportBase(track)) + '.png'), 'image/png');
+  const name = safeName(exportBase(track)) + '.png';
+  return new Promise(r=> cv.toBlob(async b=>{ await deliver(b, name, dest, {desc:'PNG image', mime:'image/png', ext:['.png']}); r(); }, 'image/png'));
 }
 
 /* ---------- sheet music ---------- */
@@ -947,12 +1112,14 @@ function tracksToMusicXML(opts){
 function hasMusic(){ return tracks.some(t=> t.notes && t.notes.length); }
 function scoreFileBase(){ return safeName(pieceName || 'score'); }
 
-function downloadMusicXML(){
+async function downloadMusicXML(){
   const msg = document.getElementById('savemsg');
   if(!hasMusic()){ if(msg) msg.textContent = 'Load or create a piece first.'; return; }
   const xml = tracksToMusicXML({beats:meterBeats, beatType:meterType});
-  downloadBlob(new Blob([xml], {type:'application/vnd.recordare.musicxml+xml'}), scoreFileBase() + '.musicxml');
-  if(msg) msg.textContent = 'Saved MusicXML ✓';
+  const blob = new Blob([xml], {type:'application/vnd.recordare.musicxml+xml'});
+  const ok = await saveBlob(blob, scoreFileBase() + '.musicxml',
+    {desc:'MusicXML', mime:'application/vnd.recordare.musicxml+xml', ext:['.musicxml']});
+  if(msg) msg.textContent = ok ? 'Saved MusicXML ✓' : '';
 }
 
 // Render the current notes to an offscreen OSMD; returns its container + page SVGs.
@@ -1004,8 +1171,9 @@ async function downloadScorePNG(){
   try{
     ctx = await renderScoreOffscreen();
     const cv = await scoreToCanvas(ctx.svgs, 2);
-    await new Promise(r=> cv.toBlob(b=>{ downloadBlob(b, scoreFileBase()+'.png'); r(); }, 'image/png'));
-    if(msg) msg.textContent = 'Saved PNG ✓';
+    const blob = await new Promise(r=> cv.toBlob(r, 'image/png'));
+    const ok = await saveBlob(blob, scoreFileBase()+'.png', {desc:'PNG image', mime:'image/png', ext:['.png']});
+    if(msg) msg.textContent = ok ? 'Saved PNG ✓' : '';
   }catch(e){ if(msg) msg.textContent = 'PNG export failed: ' + e.message; }
   finally{ if(ctx) ctx.box.remove(); }
 }
@@ -1031,8 +1199,9 @@ async function downloadScorePDF(){
       pdf.addImage(data, 'PNG', margin, margin - y, pw, fullH);   // each page shows its slice
       page++;
     }
-    pdf.save(scoreFileBase()+'.pdf');
-    if(msg) msg.textContent = 'Saved PDF ✓';
+    const ok = await saveBlob(pdf.output('blob'), scoreFileBase()+'.pdf',
+      {desc:'PDF document', mime:'application/pdf', ext:['.pdf']});
+    if(msg) msg.textContent = ok ? 'Saved PDF ✓' : '';
   }catch(e){ if(msg) msg.textContent = 'PDF export failed: ' + e.message; }
   finally{ if(ctx) ctx.box.remove(); }
 }
@@ -1140,7 +1309,9 @@ async function renderPartSheet(track, box){
     inst.render();
     tagSheetNotes(inst, track.id);   // mark noteheads so playback can highlight them
     track._sheetHTML = box.innerHTML; track._sheetKey = transposeOffset;   // cache keyed by transpose (data-attrs ride along)
-    repaintPlayhead();   // re-light the current note now that this staff exists (async render)
+    if(track._previewScroll) box.scrollTop = track._previewScroll;   // keep the reader's place after an edit re-engrave
+    repaintPlayhead();    // re-light the current note now that this staff exists (async render)
+    repaintSelection();   // and re-mark the selected note if we're editing this part
   }catch(e){ box.innerHTML = '<p class="hint" style="margin:4px">Could not engrave this part.</p>'; }
 }
 
@@ -1206,7 +1377,7 @@ const EDIT_DURS = [['whole',4],['dotted half',3],['half',2],['dotted quarter',1.
 const DUR_ABBR = {4:'w',3:'h.',2:'h',1.5:'q.',1:'q',0.75:'e.',0.5:'e',0.25:'s'};
 function durAbbr(d){ return DUR_ABBR[d] || (d+'b'); }
 
-let editOsmd = null, editPreviewTimer = 0, undoStack = [];
+let undoStack = [];
 // Capture key + transpose too, so undoing a transpose restores both the notes
 // (snapshot is taken before they are re-spelled) and the key/offset.
 function snapshot(){ return JSON.stringify({tracks, meterBeats, meterType, pieceName, transposeOffset, tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter}); }
@@ -1253,91 +1424,94 @@ function defaultNote(prev){
   return {isRest:false, step:'C', alter:0, oct:5, durBeat:1};
 }
 
-// After any edit: reflow, invalidate sheets, refresh player + editor + preview, re-sync playback.
+// After any edit: reflow, invalidate sheets, re-render the player (which rebuilds
+// any open inline editors + live previews), re-sync playback. autosave via contentChanged.
 function afterEdit(markEdited){
   if(markEdited !== false) edited = true;
   tracks.forEach(reflowTrack);
   invalidateSheets();
   render();
-  renderEditor();
-  scheduleEditPreview();
   contentChanged();
 }
 
 function selectedTrack(){ return editSel ? tracks.find(t=> t.id === editSel.trackId) : null; }
 function selectedNote(){ const t = selectedTrack(); return (t && editSel && t.notes[editSel.index]) || null; }
 
-function renderEditor(){
-  const wrap = document.getElementById('editparts'); if(!wrap) return;
-  const tEl = document.getElementById('edTitle'); if(tEl && document.activeElement !== tEl) tEl.value = pieceName || '';
-  document.getElementById('edBeats').value = String(meterBeats);
-  document.getElementById('edBeatType').value = String(meterType);
-  wrap.innerHTML = '';
-  if(!tracks.length){
-    wrap.innerHTML = '<p class="hint">Nothing to edit yet. Load a file or type a melody above, or click <b>New piece</b> to start a blank one.</p>';
-    return;
+// The set of selected note indices for a track: the multi-selection if it owns
+// this track, else just the single anchor. Empty when nothing is selected here.
+function selectionSetFor(trackId){
+  if(multiSel && multiSel.trackId === trackId) return multiSel.set;
+  if(editSel && editSel.trackId === trackId) return new Set([editSel.index]);
+  return new Set();
+}
+// Selected indices (sorted) for the part currently being bulk-edited.
+function selectedIndices(){
+  if(multiSel) return [...multiSel.set].sort((a,b)=> a-b);
+  return editSel ? [editSel.index] : [];
+}
+
+// A note was clicked (a solfa cell or a notehead in a part's edit mode). Plain click
+// = single select + audition; Shift = range from the anchor; Cmd/Ctrl = toggle one.
+function selectChip(trackId, index, n, e){
+  if(e && e.shiftKey && editSel && editSel.trackId === trackId){
+    const lo = Math.min(editSel.index, index), hi = Math.max(editSel.index, index);
+    const set = new Set(); for(let i=lo;i<=hi;i++) set.add(i);
+    multiSel = set.size > 1 ? {trackId, set} : null;
+    editSel = {trackId, index};                       // anchor moves to the clicked end
+  } else if(e && (e.metaKey || e.ctrlKey)){
+    const set = new Set(selectionSetFor(trackId));
+    if(set.has(index)) set.delete(index); else set.add(index);
+    multiSel = set.size > 1 ? {trackId, set} : null;
+    editSel = {trackId, index: set.size ? (set.has(index) ? index : [...set][0]) : index};
+  } else {
+    multiSel = null;
+    editSel = {trackId, index};
+    if(!isPlaying) auditionNote(n);
   }
-  // Flag likely OMR slips (very short parts) so the user can review and remove
-  // them by hand. Nothing is ever deleted automatically.
-  const suspects = suspectParts();
-  const suspectIds = new Set(suspects.map(s=> s.id));
-  if(suspects.length){
-    const notice = document.createElement('div'); notice.className = 'editnote';
-    const span = document.createElement('span');
-    span.textContent = `${suspects.length} very short part(s) flagged below, often OMR slips. Check them, then keep or remove (this is undoable).`;
-    const btn = document.createElement('button'); btn.className = 'ghost'; btn.textContent = `Remove ${suspects.length} flagged part(s)`;
-    btn.onclick = ()=>{ pushUndo(); tracks = tracks.filter(t=> !suspectIds.has(t.id)); if(editSel && suspectIds.has(editSel.trackId)) editSel = null; afterEdit(); };
-    notice.append(span, btn);
-    wrap.append(notice);
-  }
-  tracks.forEach(t=>{
-    const isSel = !!(editSel && editSel.trackId === t.id);
-    const collapsed = !!t.editCollapsed && !isSel;   // never collapse the part you're editing
-    const part = document.createElement('div'); part.className = 'epart' + (suspectIds.has(t.id) ? ' suspect' : '') + (collapsed ? ' collapsed' : '');
-    const head = document.createElement('div'); head.className = 'epart-head';
-    const caret = document.createElement('button'); caret.className = 'ecaret';
-    caret.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-down');
-    caret.title = collapsed ? 'Expand this part' : 'Collapse this part';
-    caret.onclick = ()=>{ t.editCollapsed = !t.editCollapsed; renderEditor(); };
-    const playBtn = document.createElement('button'); playBtn.className = 'epart-play partplay'; playBtn.dataset.tid = t.id;
-    playBtn.innerHTML = icon('play'); playBtn.title = 'Play this part';
-    playBtn.onclick = ()=> togglePartPlay(t);
-    const name = document.createElement('input'); name.type = 'text'; name.value = t.label || ''; name.placeholder = 'Part name'; name.title = 'Rename this part';
-    name.oninput = ()=>{ t.label = name.value; render(); scheduleEditPreview(); };
-    const pc = pitchedCount(t);
-    const count = document.createElement('span'); count.className = 'epart-count' + (suspectIds.has(t.id) ? ' suspect' : '');
-    count.textContent = pc === 1 ? '1 note' : pc + ' notes';
-    if(suspectIds.has(t.id)) count.title = 'Very short, likely an OMR slip. Keep it or delete it.';
-    const del = document.createElement('button'); del.className = 'ghost delpart'; del.textContent = 'Delete part';
-    del.onclick = ()=>{ pushUndo(); tracks = tracks.filter(x=> x !== t); if(editSel && editSel.trackId === t.id) editSel = null; afterEdit(); };
-    head.append(caret, playBtn, name, count, del);
-    part.append(head);
-    if(!collapsed){
-      const chips = document.createElement('div'); chips.className = 'echips';
-      t.notes.forEach((n,i)=>{
-        const c = document.createElement('div');
-        c.id = 'ec-' + t.id + '-' + i;   // so playback can light the sounding chip
-        c.className = 'echip' + (n.isRest ? ' rest' : '') + (isSel && editSel.index === i ? ' sel' : '');
-        if(n.isRest) c.innerHTML = `<span class="solf">–</span><span class="nm">rest</span><span class="dur">${durAbbr(n.durBeat)}</span>`;
-        else { const a = analyze(n); c.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span><span class="dur">${durAbbr(n.durBeat)}</span>`; }
-        c.onclick = ()=>{ editSel = {trackId:t.id, index:i}; renderEditor(); highlightEditorSelection(); if(!isPlaying) auditionNote(n); };
-        chips.append(c);
-      });
-      const add = document.createElement('div'); add.className = 'echip addchip'; add.textContent = '+'; add.title = 'Add a note to the end of this part';
-      add.onclick = ()=>{ pushUndo(); t.notes.push(defaultNote(t.notes[t.notes.length-1])); editSel = {trackId:t.id, index:t.notes.length-1}; afterEdit(); };
-      chips.append(add);
-      part.append(chips);
-      // The note editor lives right under the part that owns the selected note,
-      // so you never have to scroll past other parts to change or delete it.
-      if(isSel && t.notes[editSel.index]){
-        const ne = document.createElement('div'); ne.className = 'noteeditor';
-        renderNoteEditor(ne);
-        part.append(ne);
-      }
-    }
-    wrap.append(part);
-  });
-  refreshAuditionUI();   // show the stop icon if a part is currently auditioning
+  render();
+}
+
+// ---- bulk edit over the current multi-selection ----
+function bulkApply(fn){
+  const t = selectedTrack(); if(!t) return;
+  pushUndo();
+  selectedIndices().forEach(i=>{ const n = t.notes[i]; if(n) fn(n); });
+  afterEdit();
+}
+function bulkOct(d){ bulkApply(n=>{ if(!n.isRest) n.oct = Math.max(0, Math.min(9, (n.oct||5) + d)); }); }
+function bulkNudge(steps){ bulkApply(n=> nudgePitch(n, steps)); }
+function bulkDur(v){ bulkApply(n=>{ n.durBeat = v; }); }
+function bulkRest(makeRest){ bulkApply(n=>{ if(makeRest) n.isRest = true; else { n.isRest = false; n.step = n.step||'C'; n.alter = n.alter||0; n.oct = n.oct||5; } }); }
+function bulkDelete(){
+  const t = selectedTrack(); if(!t) return;
+  const idxs = selectedIndices(); if(!idxs.length) return;
+  pushUndo();
+  idxs.sort((a,b)=> b-a).forEach(i=> t.notes.splice(i, 1));   // high -> low so indices stay valid
+  multiSel = null;
+  editSel = t.notes.length ? {trackId:t.id, index: Math.min(idxs[idxs.length-1], t.notes.length-1)} : null;
+  afterEdit();
+}
+// Copy the selected notes (deep copy, in order) to the clipboard.
+function copySelection(){
+  const t = selectedTrack(); if(!t) return;
+  noteClip = selectedIndices().map(i=> t.notes[i]).filter(Boolean).map(n=> Object.assign({}, n));
+  refreshPasteButtons();
+}
+// Paste the clipboard into the current part right after the anchor (exact pitches).
+function pasteAfterSelection(){
+  if(!noteClip || !noteClip.length) return;
+  const t = selectedTrack(); if(!t) return;
+  pushUndo();
+  const at = (multiSel ? Math.max(...multiSel.set) : (editSel ? editSel.index : t.notes.length - 1)) + 1;
+  const copies = noteClip.map(n=> Object.assign({}, n));
+  t.notes.splice(at, 0, ...copies);
+  multiSel = copies.length > 1 ? {trackId:t.id, set:new Set(copies.map((_,k)=> at + k))} : null;
+  editSel = {trackId:t.id, index: at};
+  afterEdit();
+}
+function refreshPasteButtons(){
+  const has = !!(noteClip && noteClip.length);
+  document.querySelectorAll('.nePaste').forEach(b=>{ b.disabled = !has; b.title = has ? ('Paste ' + noteClip.length + ' note(s) after this one') : 'Nothing copied yet'; });
 }
 
 // Fill the per-note controls into `panel` (an inline box under the selected part).
@@ -1361,6 +1535,8 @@ function renderNoteEditor(panel){
       <button class="minibtn" id="neInsBefore">Insert before</button>
       <button class="minibtn" id="neInsAfter">Insert after</button>
       <button class="minibtn" id="neDelete">Delete</button>
+      <button class="minibtn" id="neCopy">Copy</button>
+      <button class="minibtn nePaste" id="nePaste">Paste</button>
     </div>`;
   const t = selectedTrack(), i = editSel.index;
   panel.querySelector('#neStep').onchange = e=>{ pushUndo(); n.step = e.target.value; afterEdit(); };
@@ -1372,28 +1548,65 @@ function renderNoteEditor(panel){
   panel.querySelector('#neInsBefore').onclick = ()=>{ pushUndo(); t.notes.splice(i, 0, defaultNote(n)); afterEdit(); };
   panel.querySelector('#neInsAfter').onclick = ()=>{ pushUndo(); t.notes.splice(i+1, 0, defaultNote(n)); editSel = {trackId:t.id, index:i+1}; afterEdit(); };
   panel.querySelector('#neDelete').onclick = ()=>{ pushUndo(); t.notes.splice(i, 1); editSel = t.notes.length ? {trackId:t.id, index:Math.min(i, t.notes.length-1)} : null; afterEdit(); };
+  panel.querySelector('#neCopy').onclick = copySelection;
+  panel.querySelector('#nePaste').onclick = pasteAfterSelection;
+  refreshPasteButtons();
 }
 
-function scheduleEditPreview(){ clearTimeout(editPreviewTimer); editPreviewTimer = setTimeout(renderEditPreview, 250); autosave(); }
-async function renderEditPreview(){
-  const box = document.getElementById('editsheet'); if(!box) return;
-  if(!window.opensheetmusicdisplay){ box.innerHTML = '<p class="hint" style="margin:6px">Sheet renderer not loaded.</p>'; editOsmd = null; return; }
-  if(!hasMusic()){ box.innerHTML = '<p class="hint" style="margin:6px">Add some notes to see the engraved preview.</p>'; editOsmd = null; return; }
-  try{
-    if(!editOsmd){ box.innerHTML = ''; editOsmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:true, followCursor:false, autoResize:false})); }
-    await editOsmd.load(tracksToMusicXML({beats:meterBeats, beatType:meterType}));
-    editOsmd.render();
-    tagSheetNotes(editOsmd, null, true);   // per-track tags so playback lights the right notes
-    highlightEditorSelection();            // re-apply the staff highlight after each render
-  }catch(e){ box.innerHTML = '<p class="hint" style="margin:6px">Could not engrave: ' + e.message + '</p>'; editOsmd = null; }
+// Bulk-edit bar shown when 2+ notes are selected in a part. Acts on the whole selection.
+function renderBulkBar(panel, t, count){
+  const durOpts = '<option value="">Duration…</option>' + EDIT_DURS.map(([lab,v])=> `<option value="${v}">${lab}</option>`).join('');
+  panel.innerHTML = `
+    <span class="bulkcount">${count} notes selected</span>
+    <div class="grp"><label>Pitch</label>
+      <button class="minibtn" id="blPitchDn">step −</button>
+      <button class="minibtn" id="blPitchUp">step +</button>
+      <button class="minibtn" id="blOctDn">oct −</button>
+      <button class="minibtn" id="blOctUp">oct +</button>
+    </div>
+    <div class="grp"><label>Set</label><select id="blDur">${durOpts}</select></div>
+    <button class="minibtn" id="blRest">Make rest</button>
+    <div class="grp">
+      <button class="minibtn" id="blCopy">Copy</button>
+      <button class="minibtn nePaste" id="blPaste">Paste</button>
+      <button class="minibtn" id="blDelete">Delete</button>
+    </div>`;
+  panel.querySelector('#blPitchUp').onclick = ()=> bulkNudge(1);
+  panel.querySelector('#blPitchDn').onclick = ()=> bulkNudge(-1);
+  panel.querySelector('#blOctUp').onclick = ()=> bulkOct(1);
+  panel.querySelector('#blOctDn').onclick = ()=> bulkOct(-1);
+  panel.querySelector('#blDur').onchange = e=>{ if(e.target.value) bulkDur(parseFloat(e.target.value)); };
+  panel.querySelector('#blRest').onclick = ()=> bulkRest(true);
+  panel.querySelector('#blCopy').onclick = copySelection;
+  panel.querySelector('#blPaste').onclick = pasteAfterSelection;
+  panel.querySelector('#blDelete').onclick = bulkDelete;
+  refreshPasteButtons();
 }
 
+
+function nextTrackId(){
+  const nums = tracks.map(t=> parseInt((t.id||'t0').slice(1)) || 0);
+  return 't' + ((nums.length ? Math.max(...nums) : -1) + 1);
+}
 function addPart(){
   pushUndo();
-  const nums = tracks.map(t=> parseInt((t.id||'t0').slice(1)) || 0);
-  const id = 't' + ((nums.length ? Math.max(...nums) : -1) + 1);
+  const id = nextTrackId();
   tracks.push({id, label:'Voice ' + (tracks.length+1), enabled:true, solo:false, vol:1, notes:[ defaultNote(null) ]});
   editSel = {trackId:id, index:0};
+  afterEdit();
+}
+// Duplicate a part (a deep copy of its notes), inserted right after it, in edit mode.
+function duplicatePart(t){
+  pushUndo();
+  const id = nextTrackId();
+  const copy = {
+    id, label: (t.label || 'Voice') + ' copy',
+    enabled: true, solo: false, vol: t.vol != null ? t.vol : 1,
+    view: t.view, editing: true,
+    notes: (t.notes || []).map(n=> Object.assign({}, n)),
+  };
+  tracks.splice(tracks.indexOf(t) + 1, 0, copy);
+  editSel = {trackId: id, index: 0};
   afterEdit();
 }
 
@@ -1402,13 +1615,16 @@ function addPart(){
 // fields are recomputed by reflow, so specs only need step/alter/oct/durBeat.
 function startPiece(partsSpec){
   if(hasMusic() && !confirm('Start a new piece? This clears the current one.')) return;
+  exitReview();
   pushUndo();
   pieceName = ''; lastXML = ''; transposeOffset = 0; edited = true;
   meterBeats = 4; meterType = 4; setKey(0, 'C');   // sensible defaults: C major, 4/4
   tracks = partsSpec.map((s,i)=> ({id:'t'+i, label:s.label, enabled:true, solo:false, vol:1, notes:[ s.note || defaultNote(null) ]}));
   soloActive = false; editSel = {trackId:'t0', index:0};
+  tracks[0].editing = true;   // open the first part's inline editor so you can start typing notes
   afterEdit();
-  switchTab('edit');
+  switchTab('player');
+  openEditTools();            // reveal Title/timesig/Add part etc. for the new piece
   const tEl = document.getElementById('edTitle'); if(tEl){ tEl.value = ''; tEl.focus(); }
 }
 function newPiece(){ startPiece([{label:'Voice 1'}]); }
@@ -1445,23 +1661,26 @@ function restoreState(s){
   tracks = s.tracks;
   meterBeats = s.meterBeats || 4; meterType = s.meterType || 4;
   pieceName = s.pieceName || ''; transposeOffset = s.transposeOffset || 0;
-  edited = true; lastXML = ''; soloActive = false; editSel = null;
+  edited = true; lastXML = ''; editSel = null;
   tracks.forEach(t=>{ if(t.vol === undefined) t.vol = 1; if(t.enabled === undefined) t.enabled = true; });
+  soloActive = tracks.some(t=> t.solo);   // re-activate solo if any voice was soloed (survives reload)
   if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
   if(s.bpm) setTempo(s.bpm);
   if(s.showDynamics != null){ showDynamics = s.showDynamics; document.querySelectorAll('#dynToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.dyn === 'show') === showDynamics)); }
-  invalidateSheets(); render(); syncEditorView(); contentChanged();
+  invalidateSheets(); render(); contentChanged();
   return true;
 }
 function restoreSession(){
   try{ const raw = localStorage.getItem(SESSION_KEY); return raw ? restoreState(JSON.parse(raw)) : false; }
   catch(_){ return false; }
 }
-function saveProject(){
+async function saveProject(){
   const m = document.getElementById('editmsg');
   if(!hasMusic()){ if(m) m.textContent = 'Nothing to save yet.'; return; }
-  downloadBlob(new Blob([JSON.stringify(sessionState())], {type:'application/json'}), safeName(pieceName || 'project') + '.solfege.json');
-  if(m) m.textContent = 'Project saved.';
+  const blob = new Blob([JSON.stringify(sessionState())], {type:'application/json'});
+  const ok = await saveBlob(blob, safeName(pieceName || 'project') + '.solfege.json',
+    {desc:'Solfège project', mime:'application/json', ext:['.json']});
+  if(m) m.textContent = ok ? 'Project saved.' : '';
 }
 function openProject(file){
   const r = new FileReader();
@@ -1472,31 +1691,64 @@ function openProject(file){
   r.readAsText(file);
 }
 
-// True when the Edit tab is the one on screen. Used to keep the editor in sync
-// with content loaded/transposed from controls that live outside it (file load,
-// the melody box, presets, key/transpose), so it never needs a tab bounce to refresh.
-function editVisible(){ const v = document.getElementById('view-edit'); return !!(v && !v.hidden); }
-function syncEditorView(){ if(editVisible()){ renderEditor(); scheduleEditPreview(); } }
 function playerVisible(){ const v = document.getElementById('view-player'); return !!(v && !v.hidden); }
 
-// Show a tab by name (and refresh the editor when entering it).
+// Show a tab by name.
 function switchTab(view){
   document.querySelectorAll('#tabs .tab').forEach(x=> x.classList.toggle('on', x.dataset.view === view));
   document.querySelectorAll('.view').forEach(s=> s.hidden = (s.id !== 'view-' + view));
-  if(view !== 'edit'){ const ban = document.getElementById('omrbanner'); if(ban) ban.hidden = true; }
-  if(view === 'edit'){ renderEditor(); renderEditPreview(); }
+  syncEditTools(view);
   if(view === 'player') render();   // now visible: engrave any per-part sheets that were deferred while hidden
 }
 
+// The piece tools toolbar (title/timesig/new/add/undo/save) is revealed by the
+// Player's "Tools" toggle; hidden on the Full score tab.
+let editToolsOpen = false;
+function syncEditTools(view){
+  const tools = document.getElementById('edtools');
+  const toggle = document.getElementById('edToolsToggle');
+  if(!tools) return;
+  if(view === 'player'){ tools.hidden = !editToolsOpen; if(toggle){ toggle.hidden = false; toggle.classList.toggle('on', editToolsOpen); } }
+  else { tools.hidden = true; if(toggle) toggle.hidden = true; }
+}
+function toggleEditTools(){ editToolsOpen = !editToolsOpen; syncEditTools('player'); }
+// Open the tools toolbar in the player (used after New piece so you can name it).
+function openEditTools(){ editToolsOpen = true; syncEditTools('player'); }
+
 // Phase 5: after OMR, land in the editor with a "check me" banner before the player.
+// Phase 5: after OMR, review/fix in the PLAYER (where you see + hear each part)
+// behind a banner; very short parts are flagged on their rows as likely slips.
+let reviewMode = false;
 function enterReviewMode(){
   editSel = tracks.length ? {trackId: tracks[0].id, index: 0} : null;
-  switchTab('edit');
-  const ban = document.getElementById('omrbanner');
-  if(!ban) return;
-  const span = ban.querySelector('span');
-  if(span) span.textContent = 'Transcribed from your image. OMR is not perfect: review each part (very short ones are flagged as likely slips), fix any wrong notes, then send it to the player.';
-  ban.hidden = false;
+  reviewMode = true;
+  switchTab('player');   // renders the rows; reviewMode makes suspects flag
+  setReviewBanner();
+}
+// Fill the banner text + show/hide the "Remove flagged" button for the current
+// suspect set, and reflect reviewMode in the banner's visibility.
+function setReviewBanner(){
+  const ban = document.getElementById('omrbanner'); if(!ban) return;
+  ban.hidden = !reviewMode;
+  if(!reviewMode) return;
+  const suspects = suspectParts();
+  const txt = ban.querySelector('.omrtext');
+  if(txt) txt.textContent = suspects.length
+    ? `Transcribed from your image. ${suspects.length} very short part(s) are flagged below as likely OMR slips. Review each part, fix wrong notes, then keep or remove the flagged ones.`
+    : 'Transcribed from your image. OMR is not perfect, so review each part, fix any wrong notes or rhythms, then dismiss this.';
+  const rm = ban.querySelector('#omrRemove');
+  if(rm){ rm.hidden = !suspects.length; rm.textContent = `Remove ${suspects.length} flagged part(s)`; }
+}
+// Leave review: clear the flag state and hide the banner. Callers re-render.
+function exitReview(){ reviewMode = false; const ban = document.getElementById('omrbanner'); if(ban) ban.hidden = true; }
+// Remove the currently flagged (suspect) parts - user-initiated, undoable.
+function removeFlaggedParts(){
+  const ids = new Set(suspectParts().map(s=> s.id)); if(!ids.size) return;
+  pushUndo();
+  tracks = tracks.filter(t=> !ids.has(t.id));
+  if(editSel && ids.has(editSel.trackId)) editSel = null;
+  afterEdit();
+  setReviewBanner();   // fewer/no suspects now: update count / hide the button
 }
 function setMeterFromUI(){
   pushUndo();
@@ -1505,91 +1757,14 @@ function setMeterFromUI(){
   afterEdit();
 }
 
-/* ---- Phase 3: click-to-select + drag-to-nudge on the preview staff ---- */
-const LETTERS7 = ['C','D','E','F','G','A','B'];
 // Move a note by `steps` diatonic letter-steps (octave wraps; accidental kept).
+// Used by the keyboard up/down nudge when a note is selected in a part's edit mode.
+const LETTERS7 = ['C','D','E','F','G','A','B'];
 function nudgePitch(n, steps){
   if(n.isRest || !steps) return;
   const ni = LETTERS7.indexOf(n.step) + steps;
   n.oct = (n.oct||5) + Math.floor(ni/7);
   n.step = LETTERS7[((ni % 7) + 7) % 7];
-}
-function previewPitchName(n, steps){
-  const ni = LETTERS7.indexOf(n.step) + steps;
-  const oct = (n.oct||5) + Math.floor(ni/7);
-  const step = LETTERS7[((ni % 7) + 7) % 7];
-  const acc = n.alter > 0 ? '#'.repeat(n.alter) : n.alter < 0 ? 'b'.repeat(-n.alter) : '';
-  return step + acc + oct;
-}
-// Pixel point -> OSMD unit point within a given page <svg>.
-function pixelToUnit(svg, clientX, clientY){
-  const r = svg.getBoundingClientRect();
-  const u = (editOsmd.EngravingRules && editOsmd.EngravingRules.UnitInPixels) || 10;
-  return new opensheetmusicdisplay.PointF2D((clientX - r.left) / u, (clientY - r.top) / u);
-}
-// Map an OSMD click to {trackId, index} in our model (by instrument index + beat).
-function noteAtPoint(pt){
-  let gn = null;
-  try{ gn = editOsmd.GraphicSheet.GetNearestNote(pt, 6); }catch(_){}
-  if(!gn || !gn.sourceNote) return null;
-  let pi = -1;
-  try{ pi = editOsmd.Sheet.Instruments.indexOf(gn.sourceNote.ParentVoiceEntry.ParentVoice.Parent); }catch(_){}
-  if(pi < 0 || pi >= tracks.length) return null;
-  const beat = gn.sourceNote.getAbsoluteTimestamp().RealValue * 4;
-  const notes = tracks[pi].notes;
-  let idx = notes.findIndex(n=> beat >= n.startBeat - 1e-6 && beat < n.startBeat + n.durBeat - 1e-6);
-  if(idx < 0){ let best = Infinity; notes.forEach((n,i)=>{ const d = Math.abs(n.startBeat - beat); if(d < best){ best = d; idx = i; } }); }
-  return idx < 0 ? null : {trackId: tracks[pi].id, index: idx};
-}
-function clearStaffHighlight(){ document.querySelectorAll('#editsheet .ednote-sel').forEach(el=> el.classList.remove('ednote-sel')); }
-function highlightEditorSelection(){
-  clearStaffHighlight();
-  if(!editOsmd || !editSel) return;
-  const ti = tracks.findIndex(t=> t.id === editSel.trackId); if(ti < 0) return;
-  const sel = tracks[ti].notes[editSel.index]; if(!sel) return;
-  try{
-    editOsmd.GraphicSheet.MeasureList.forEach(row=>{
-      const gm = row[ti]; if(!gm) return;
-      gm.staffEntries.forEach(se=> se.graphicalVoiceEntries.forEach(gve=> gve.notes.forEach(gn=>{
-        const beat = gn.sourceNote.getAbsoluteTimestamp().RealValue * 4;
-        if(beat >= sel.startBeat - 1e-6 && beat < sel.startBeat + sel.durBeat - 1e-6){
-          const el = gn.getSVGGElement && gn.getSVGGElement(); if(el) el.classList.add('ednote-sel');
-        }
-      })));
-    });
-  }catch(_){}
-}
-
-let dragState = null, dragLabelEl = null;
-function showDragLabel(x, y, text){
-  if(!dragLabelEl){ dragLabelEl = document.createElement('div'); dragLabelEl.className = 'draglabel'; document.body.appendChild(dragLabelEl); }
-  dragLabelEl.textContent = text; dragLabelEl.style.left = x + 'px'; dragLabelEl.style.top = y + 'px'; dragLabelEl.hidden = false;
-}
-function hideDragLabel(){ if(dragLabelEl) dragLabelEl.hidden = true; }
-const DRAG_STEP_PX = 8;   // vertical pixels per diatonic step while dragging
-
-function initStaffEditing(){
-  const box = document.getElementById('editsheet'); if(!box) return;
-  box.addEventListener('mousedown', e=>{
-    if(!editOsmd) return;
-    const svg = e.target.closest('svg'); if(!svg) return;
-    const hit = noteAtPoint(pixelToUnit(svg, e.clientX, e.clientY)); if(!hit) return;
-    editSel = hit; renderEditor(); highlightEditorSelection();
-    const n = selectedNote();
-    if(n && !n.isRest){ if(!isPlaying) auditionNote(n); dragState = {startY: e.clientY, n}; e.preventDefault(); }
-  });
-  document.addEventListener('mousemove', e=>{
-    if(!dragState) return;
-    const steps = Math.round((dragState.startY - e.clientY) / DRAG_STEP_PX);
-    showDragLabel(e.clientX, e.clientY, steps ? '→ ' + previewPitchName(dragState.n, steps) : dragState.n.name);
-  });
-  document.addEventListener('mouseup', e=>{
-    if(!dragState) return;
-    const steps = Math.round((dragState.startY - e.clientY) / DRAG_STEP_PX);
-    hideDragLabel();
-    const n = dragState.n; dragState = null;
-    if(steps){ pushUndo(); nudgePitch(n, steps); afterEdit(); }
-  });
 }
 
 /* ---------- wiring ---------- */
@@ -1605,16 +1780,30 @@ document.querySelectorAll('#dynToggle button').forEach(b=> b.addEventListener('c
 document.getElementById('trup').addEventListener('click', ()=> transposeBy(1));
 document.getElementById('trdown').addEventListener('click', ()=> transposeBy(-1));
 document.querySelectorAll('#tabs .tab').forEach(b=> b.addEventListener('click', ()=> switchTab(b.dataset.view)));
-document.getElementById('omrDone').addEventListener('click', ()=> switchTab('player'));
+document.getElementById('omrDone').addEventListener('click', ()=>{ exitReview(); render(); });
+document.getElementById('omrRemove').addEventListener('click', removeFlaggedParts);
 // Click a notehead on the player staves or the full score to seek there (like the
 // solfa cells). Delegated, so it works for cached/re-rendered sheets.
 function seekFromSheetClick(e){
   const el = e.target.closest && e.target.closest('.sheetnote');
-  if(el && el.dataset.b0 !== undefined) seek(parseFloat(el.dataset.b0), true);
+  if(!el || el.dataset.b0 === undefined) return;
+  const b0 = parseFloat(el.dataset.b0);
+  const t = el.dataset.tid && trackById(el.dataset.tid);   // per-part sheets carry a track id; full score doesn't
+  if(t && t.editing){ selectNoteByBeat(t, b0, e); return; }   // editing this part -> pick the note instead of seeking
+  seek(b0, true);
+}
+// Select the note nearest a beat in a track (used when clicking a notehead on a
+// per-part staff while that part is in edit mode). Passes the event so Shift /
+// Cmd-click extend the selection just like on the solfa cells.
+function selectNoteByBeat(t, beat, e){
+  let idx = t.notes.findIndex(n=> beat >= n.startBeat - 1e-3 && beat < n.startBeat + n.durBeat - 1e-3);
+  if(idx < 0){ let best = Infinity; t.notes.forEach((n,i)=>{ const d = Math.abs(n.startBeat - beat); if(d < best){ best = d; idx = i; } }); }
+  if(idx >= 0) selectChip(t.id, idx, t.notes[idx], e);
 }
 document.getElementById('stave').addEventListener('click', seekFromSheetClick);
 document.getElementById('sheet').addEventListener('click', seekFromSheetClick);
 // Editor controls
+document.getElementById('edToolsToggle').addEventListener('click', toggleEditTools);
 document.getElementById('edNew').addEventListener('click', newPiece);
 document.getElementById('edSATB').addEventListener('click', newSATB);
 document.getElementById('edAddPart').addEventListener('click', addPart);
@@ -1624,8 +1813,7 @@ document.getElementById('edOpenProj').addEventListener('click', ()=> document.ge
 document.getElementById('projfile').addEventListener('change', e=>{ if(e.target.files[0]) openProject(e.target.files[0]); e.target.value = ''; });
 document.getElementById('edBeats').addEventListener('change', setMeterFromUI);
 document.getElementById('edBeatType').addEventListener('change', setMeterFromUI);
-document.getElementById('edTitle').addEventListener('input', e=>{ pieceName = e.target.value; scheduleEditPreview(); });
-initStaffEditing();
+document.getElementById('edTitle').addEventListener('input', e=>{ pieceName = e.target.value; autosave(); });
 document.getElementById('tplay').addEventListener('click', togglePlay);
 document.getElementById('tback').addEventListener('click', ()=>step(-1));
 document.getElementById('tfwd').addEventListener('click', ()=>step(1));
@@ -1638,17 +1826,18 @@ document.getElementById('bpm').addEventListener('input', e=>{
   else dirty = true;
   autosave();
 });
-// Keyboard transport (ignored while typing in a field)
+// Keyboard transport (ignored while typing in a field or the contenteditable label)
 document.addEventListener('keydown', e=>{
   const tag = (e.target.tagName || '').toLowerCase();
-  if(tag==='textarea' || tag==='input' || tag==='select') return;
+  if(tag==='textarea' || tag==='input' || tag==='select' || e.target.isContentEditable) return;
   if((e.metaKey || e.ctrlKey) && e.code==='KeyZ'){ e.preventDefault(); undo(); return; }
-  // In the editor with a note selected, up/down nudge its pitch a diatonic step.
-  const inEditor = !document.getElementById('view-edit').hidden;
-  if(inEditor && editSel && (e.code==='ArrowUp' || e.code==='ArrowDown')){
-    const n = selectedNote();
-    if(n && !n.isRest){ e.preventDefault(); pushUndo(); nudgePitch(n, e.code==='ArrowUp' ? 1 : -1); afterEdit(); }
-    return;
+  const selTrack = selectedTrack(), editing = selTrack && selTrack.editing && editSel;
+  // Editing shortcuts on the selection (single note or a multi-selection):
+  if(editing){
+    if(e.code==='ArrowUp' || e.code==='ArrowDown'){ e.preventDefault(); bulkNudge(e.code==='ArrowUp' ? 1 : -1); return; }
+    if((e.metaKey || e.ctrlKey) && e.code==='KeyC'){ e.preventDefault(); copySelection(); return; }
+    if((e.metaKey || e.ctrlKey) && e.code==='KeyV'){ e.preventDefault(); pasteAfterSelection(); return; }
+    if(e.code==='Backspace' || e.code==='Delete'){ e.preventDefault(); bulkDelete(); return; }
   }
   if(e.code==='Space'){ e.preventDefault(); togglePlay(); }
   else if(e.code==='ArrowRight'){ e.preventDefault(); step(1); }

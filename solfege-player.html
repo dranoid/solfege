@@ -104,8 +104,35 @@
   <nav class="tabs" id="tabs">
     <button class="tab on" data-view="player">Player</button>
     <button class="tab" data-view="score">Full score</button>
-    <button class="tab" data-view="edit">Edit</button>
   </nav>
+
+  <!-- Piece-level tools, revealed by the Player's "Tools" toggle. -->
+  <div id="edtools" class="editbar" hidden>
+    <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" placeholder="Untitled"></div>
+    <div class="field"><label>Time signature</label>
+      <div class="seg timesig">
+        <select id="edBeats"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select>
+        <span>/</span>
+        <select id="edBeatType"><option>2</option><option selected>4</option><option>8</option><option>16</option></select>
+      </div>
+    </div>
+    <button class="ghost" id="edNew" data-icon="file-plus">New piece</button>
+    <button class="ghost" id="edSATB" data-icon="file-plus">New SATB</button>
+    <button class="ghost" id="edAddPart" data-icon="plus">Add part</button>
+    <button class="ghost" id="edUndo" title="Undo (Cmd/Ctrl+Z)">Undo</button>
+    <button class="ghost" id="edSaveProj" data-icon="download">Save project</button>
+    <button class="ghost" id="edOpenProj">Open project</button>
+    <input type="file" id="projfile" accept=".json,.solfege.json" hidden>
+    <span class="hint" id="editmsg">Click a note to edit and hear it. Changes apply live; the playback bar at the bottom plays the whole piece on any tab.</span>
+  </div>
+
+  <!-- OMR review banner. Shown in the Player after a transcription so you check/fix
+       parts where you hear them; flagged (very short) parts are marked on the rows. -->
+  <div class="omrbanner" id="omrbanner" hidden>
+    <span class="omrtext">Transcribed from your image. OMR is not perfect, so review each part, fix any wrong notes or rhythms, then dismiss this.</span>
+    <button class="ghost" id="omrRemove" hidden>Remove flagged part(s)</button>
+    <button class="ghost" id="omrDone">Looks good</button>
+  </div>
 
   <section class="view" id="view-player">
     <div class="panel">
@@ -127,12 +154,13 @@
           </div>
         </div>
         <div class="exportall">
+          <button class="ghost" id="edToolsToggle" data-icon="wrench" title="Piece tools: title, time signature, new piece, add part, undo, save/open">Tools</button>
           <button class="ghost" id="allmp3" data-icon="download">All parts as MP3</button>
           <button class="ghost" id="mixmp3" data-icon="download">Full mix (MP3)</button>
           <button class="ghost" id="allpng" data-icon="download">All parts as PNG</button>
         </div>
       </div>
-      <p class="hint">Each part shows movable-do solfège or its own engraved staff, drawn from your notes. Toggle one part, or all at once above. Use the Edit tab to fix or build parts.</p>
+      <p class="hint">Each part shows movable-do solfège or its own engraved staff, drawn from your notes. Toggle one part, or all at once above. Hit <b>Edit</b> on a part to fix its notes, or <b>Tools</b> to start or add parts.</p>
       <div class="stave" id="stave"></div>
     </div>
   </section>
@@ -153,36 +181,6 @@
       </div>
       <p class="hint">The whole score, drawn from your notes. Compare it against your PDF. The cursor follows playback. (MIDI has no notation.)</p>
       <div id="sheet" class="sheetbox"></div>
-    </div>
-  </section>
-
-  <section class="view" id="view-edit" hidden>
-    <div class="panel">
-      <div class="omrbanner" id="omrbanner" hidden>
-        <span>Transcribed from your image. OMR is not perfect, so check each part and fix any wrong notes or rhythms, then send it to the player.</span>
-        <button class="ghost" id="omrDone">Looks good, send to player</button>
-      </div>
-      <div class="editbar">
-        <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" placeholder="Untitled"></div>
-        <div class="field"><label>Time signature</label>
-          <div class="seg timesig">
-            <select id="edBeats"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select>
-            <span>/</span>
-            <select id="edBeatType"><option>2</option><option selected>4</option><option>8</option><option>16</option></select>
-          </div>
-        </div>
-        <button class="ghost" id="edNew" data-icon="file-plus">New piece</button>
-        <button class="ghost" id="edSATB" data-icon="file-plus">New SATB</button>
-        <button class="ghost" id="edAddPart" data-icon="plus">Add part</button>
-        <button class="ghost" id="edUndo" title="Undo (Cmd/Ctrl+Z)">Undo</button>
-        <button class="ghost" id="edSaveProj" data-icon="download">Save project</button>
-        <button class="ghost" id="edOpenProj">Open project</button>
-        <input type="file" id="projfile" accept=".json,.solfege.json" hidden>
-        <span class="hint" id="editmsg">Click a note to edit and hear it. Changes apply live; the playback bar at the bottom plays the whole piece on any tab.</span>
-      </div>
-      <div id="editparts" class="editparts"></div>
-      <div class="edprevhead"><span class="vm-label">Live preview</span><span class="hint">updates as you edit. Click a note here to select it; drag up/down (or ↑/↓) to change its pitch.</span></div>
-      <div id="editsheet" class="sheetbox"></div>
     </div>
   </section>
 
