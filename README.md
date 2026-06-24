@@ -13,9 +13,8 @@ Two self-contained, no-build web apps plus a small local OMR backend:
 ## Solfège Player
 
 - **Load** MusicXML / MXL / MIDI, paste MusicXML, type a melody by hand, or transcribe a photo/PDF (needs the backend).
-- **Player tab** — every voice (SATB) as movable-do solfège *or* its own engraved staff (toggle per part, or all at once). Per-part solo / mute / volume, and a sticky transport bar with playback + scrubbing.
+- **Player tab** — every voice (SATB) as movable-do solfège *or* its own engraved staff (toggle per part, or all at once). Per-part solo / mute / volume, and a sticky transport bar with playback + scrubbing. Hit **Edit** on any part to fix its notes inline — change pitch / duration / rests, insert / delete notes, set the time signature, undo (⌘/Ctrl+Z); click a note on the staff to select it, then drag (or ↑/↓) to nudge pitch. **Tools** adds / removes / renames parts and starts a **New piece** / **New SATB** from scratch.
 - **Full score tab** — the whole score engraved, cursor follows playback. Save it as **MusicXML / PNG / PDF**.
-- **Edit tab** — a grid + staff editor: change pitch / duration / rests, insert / delete notes, add / remove / rename parts, set the time signature, undo (⌘/Ctrl+Z). Click a note on the staff to select it; drag (or ↑/↓) to nudge pitch. **New piece** / **New SATB** start from scratch.
 - **Persistence** — your working piece autosaves to the browser (survives a refresh), and you can **Save / Open** a portable `.solfege.json` project.
 - **Export** — per-part MP3, full-mix MP3, per-part solfège PNG, and whole-score MusicXML / PNG / PDF.
 
@@ -33,7 +32,7 @@ cp .env.example .env          # then set AUDIVERIS_CMD + JAVA_HOME
 uvicorn main:app --env-file .env --reload --port 8000
 ```
 
-Then open <http://localhost:8000>. See [`backend/README.md`](backend/README.md) for Audiveris setup. OMR is imperfect (and needs ~300 DPI), so transcriptions land in the **Edit tab** for review before they reach the player.
+Then open <http://localhost:8000>. See [`backend/README.md`](backend/README.md) for Audiveris setup. OMR is imperfect (and needs ~300 DPI), so transcriptions arrive ready to review and fix inline (per-part **Edit**) before you rely on them.
 
 ## Tests
 
