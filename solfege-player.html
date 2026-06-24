@@ -13,6 +13,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.7/build/opensheetmusicdisplay.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/build/mp4-muxer.min.js"></script>
 <link rel="stylesheet" href="player.css">
 </head>
 <body>
@@ -152,12 +153,21 @@
               <button data-dyn="hide">Hide</button>
             </div>
           </div>
+          <div class="vm-switch">
+            <span class="vm-label">Beams</span>
+            <div class="seg" id="beamToggle">
+              <button data-beam="show" class="on">Join</button>
+              <button data-beam="hide">Split</button>
+            </div>
+          </div>
         </div>
         <div class="exportall">
           <button class="ghost" id="edToolsToggle" data-icon="wrench" title="Piece tools: title, time signature, new piece, add part, undo, save/open">Tools</button>
           <button class="ghost" id="allmp3" data-icon="download">All parts as MP3</button>
           <button class="ghost" id="mixmp3" data-icon="download">Full mix (MP3)</button>
           <button class="ghost" id="allpng" data-icon="download">All parts as PNG</button>
+          <button class="ghost" id="allvid" data-icon="film">All parts as video</button>
+          <button class="ghost" id="mixvid" data-icon="film">Full mix (video)</button>
         </div>
       </div>
       <p class="hint">Each part shows movable-do solfège or its own engraved staff, drawn from your notes. Toggle one part, or all at once above. Hit <b>Edit</b> on a part to fix its notes, or <b>Tools</b> to start or add parts.</p>

@@ -67,6 +67,7 @@
   .vbtns button{font-family:"JetBrains Mono",monospace;font-size:10px;border:1px solid var(--line2);background:var(--paper);border-radius:5px;padding:3px 10px;cursor:pointer;color:var(--muted-text);text-transform:uppercase;letter-spacing:0.06em}
   .vbtns button.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}
   .vbtns .delpart{color:var(--accent);border-color:var(--accent)}   /* destructive: delete this part */
+  .clefpick{font-family:"JetBrains Mono",monospace;font-size:10px;border:1px solid var(--line2);background:var(--paper);border-radius:5px;padding:3px 6px;cursor:pointer;color:var(--muted-text);text-transform:uppercase;letter-spacing:0.06em}
   .vplay{display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;background:var(--paper);border:1px solid var(--line2);border-radius:5px;cursor:pointer;color:var(--accent2);font-size:12px;flex:none}
   .vplay:hover{border-color:var(--accent2)}
   .vplay.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}
@@ -75,7 +76,18 @@
   .vedit:hover{border-color:var(--accent)}
   .vedit.on{background:var(--accent);color:var(--paper);border-color:var(--accent)}
   .stave-row{display:flex;flex-wrap:wrap;gap:6px}
-  .note{min-width:54px;text-align:center;padding:8px 6px 10px;border-radius:8px;border:1px solid transparent;background:var(--paper);transition:all .15s}
+  .phrasegroup{display:flex;flex-wrap:nowrap;gap:6px}   /* a slurred/tied run stays on one line so its arc never breaks */
+  .barline{align-self:stretch;width:0;border-left:2px solid var(--line2);margin:2px 2px}   /* metre divider between bars */
+  .barwarn{align-self:center;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent);background:#f0dcd8;border-radius:5px;padding:3px 8px;white-space:nowrap}   /* incomplete last bar nudge */
+  .note{position:relative;min-width:54px;text-align:center;padding:8px 6px 10px;border-radius:8px;border:1px solid transparent;background:var(--paper);transition:all .15s}
+  /* grid markers for phrasing (the engraved staff shows the real arcs). Both slur and tie
+     get a clear bridging arc + a tint, so the grouped notes read as one gesture. */
+  /* slur: green over-arc across the run (top, curving up), tinted green. */
+  .note.slurred{background:#dde9e4}
+  .note.slurlink::after{content:"";position:absolute;left:50%;width:calc(100% + 6px);top:1px;height:11px;border:2.5px solid var(--accent2);border-bottom:none;border-radius:14px 14px 0 0;z-index:2}
+  /* tie: same-pitch notes sustained as one (bottom, curving down), tinted red. Tie wins the tint when a note is both. */
+  .note.tied{background:#f0dcd8}
+  .note.tiestart::before{content:"";position:absolute;left:50%;width:calc(100% + 6px);bottom:1px;height:11px;border:2.5px solid var(--accent);border-top:none;border-radius:0 0 14px 14px;z-index:2}
   .note.rest{opacity:0.45}
   .note.active{background:var(--accent2);border-color:var(--accent2);transform:translateY(-3px)}
   .note.active .solf,.note.active .nm,.note.active .deg{color:var(--paper)}
@@ -181,6 +193,7 @@
   .noteeditor label{font-size:11px}
   .noteeditor select,.noteeditor .minibtn{font-family:"JetBrains Mono",monospace;font-size:13px;background:var(--paper);border:1px solid var(--line2);border-radius:6px;padding:5px 8px;cursor:pointer;color:var(--ink)}
   .noteeditor .minibtn:hover{border-color:var(--accent);color:var(--accent)}
+  .noteeditor .minibtn.on{background:var(--accent2);color:var(--paper);border-color:var(--accent2)}   /* e.g. Lead-in active */
   .noteeditor .nm{min-width:26px;text-align:center}
   .edprevhead{display:flex;align-items:baseline;gap:10px;margin-top:6px;margin-bottom:2px}
   #editsheet svg{cursor:pointer}

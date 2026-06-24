@@ -11,6 +11,7 @@ const ICON_SVG = {
   'plus':         '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
   'file-plus':    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>',
   'wrench':       '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  'film':         '<rect x="2.5" y="4" width="19" height="16" rx="2"/><line x1="7" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="17" y2="20"/><line x1="2.5" y1="12" x2="21.5" y2="12"/><line x1="2.5" y1="8" x2="7" y2="8"/><line x1="17" y1="8" x2="21.5" y2="8"/><line x1="2.5" y1="16" x2="7" y2="16"/><line x1="17" y1="16" x2="21.5" y2="16"/>',
 };
 function icon(name){
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_SVG[name]||''}</svg>`;
@@ -83,12 +84,16 @@ let tracks = [];
 let soloActive = false;
 let pieceName = '';   // name of the loaded piece, used to prefix exported files
 let lastXML = '';     // raw MusicXML of the loaded piece (for the sheet-music view)
-let transposeOffset = 0;   // semitones shifted from the file's original key
+let transposeOffset = 0;   // semitones shifted from the file's original key (drives the engraved-sheet transpose for imports)
+let homeOffset = 0;        // the transposeOffset that counts as "Transpose 0": set when you pick a key, so the
+                           // Transpose readout shows steps from your chosen home key, not from C / the file key
+function displayTranspose(){ return transposeOffset - homeOffset; }   // the user-facing transpose number
 let edited = false;        // true once the notes have been edited/built (sheets then come from the serializer, not lastXML)
 let editSel = null;        // {trackId, index} primary/anchor note selected in the editor
 let multiSel = null;       // {trackId, set:Set<index>} when 2+ notes are selected in one part (bulk edit)
 let noteClip = null;       // deep-copied notes on the clipboard (copy/paste within & across parts)
 let meterBeats = 4, meterType = 4;   // piece meter (parsed from imports; editable in the editor)
+let pickupBeats = 0;   // anacrusis/lead-in: quarter-note beats in the short first (pickup) bar, 0 = none
 
 /* ---------- manual entry ---------- */
 function parseToken(tok){
@@ -105,7 +110,7 @@ function parseToken(tok){
 
 function buildManual(){
   exitReview();
-  pieceName = ''; lastXML = ''; transposeOffset = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();
+  pieceName = ''; lastXML = ''; transposeOffset = 0; homeOffset = 0; pickupBeats = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();
   const toks = document.getElementById('notes').value.trim().split(/[\s,]+/).filter(Boolean);
   let beat = 0; const notes = [];
   toks.forEach(tok=>{
@@ -149,9 +154,15 @@ function parseParts(doc){
   let lastDiv = 1;
   parts.forEach((part, pi)=>{
     let divisions = lastDiv, measureStart = 0;
+    const clefByStaff = {};   // staff number -> clef name, so each voice keeps its written clef
     [...part.querySelectorAll('measure')].forEach(measure=>{
       const d = measure.querySelector('attributes divisions');
       if(d) divisions = parseInt(d.textContent) || divisions;
+      [...measure.querySelectorAll(':scope > attributes > clef')].forEach(cl=>{
+        const num = cl.getAttribute('number') || '1';
+        const name = clefNameFrom(cl.querySelector('sign')?.textContent, cl.querySelector('line')?.textContent);
+        if(name && !clefByStaff[num]) clefByStaff[num] = name;
+      });
       let cursor = 0, measureLen = 0; const prev = {};
       [...measure.children].forEach(el=>{
         const tag = el.tagName;
@@ -178,7 +189,7 @@ function parseParts(doc){
           }
           if(note){
             let t = map.get(key);
-            if(!t){ t = {key, notes:[], sum:0, cnt:0}; map.set(key, t); }
+            if(!t){ t = {key, notes:[], sum:0, cnt:0, clef: clefByStaff[staff] || null}; map.set(key, t); }
             t.notes.push(note);
             if(!note.isRest){ t.sum += note.midi; t.cnt++; }
             prev[key] = start;
@@ -219,7 +230,7 @@ function loadMusicXMLText(txt, msgEl){
     exitReview();   // a fresh load clears any prior OMR review state (transcribePhoto re-enters it after)
     const doc = new DOMParser().parseFromString(txt, 'application/xml');
     if(doc.querySelector('parsererror')) throw new Error('invalid XML');
-    lastXML = txt; transposeOffset = 0; edited = false; resetSheets();   // keep raw XML for the sheet-music view
+    lastXML = txt; transposeOffset = 0; homeOffset = 0; pickupBeats = 0; edited = false; resetSheets();   // keep raw XML for the sheet-music view
     if(!pieceName){ const ti = doc.querySelector('work-title, movement-title'); if(ti && ti.textContent.trim()) pieceName = ti.textContent.trim(); }
     const fifthsEl = doc.querySelector('key fifths');
     if(fifthsEl){ const f = FIFTHS[fifthsEl.textContent.trim()]; if(f) setKey(f[0], f[1]); }
@@ -249,7 +260,7 @@ async function loadMxl(buf, msgEl){
 /* ---------- MIDI ---------- */
 function loadMidi(buf, msgEl){
   exitReview();
-  lastXML = ''; transposeOffset = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();   // MIDI has no original notation; the serializer engraves it
+  lastXML = ''; transposeOffset = 0; homeOffset = 0; pickupBeats = 0; edited = false; meterBeats = 4; meterType = 4; resetSheets();   // MIDI has no original notation; the serializer engraves it
   const MidiCtor = (window.Midi && window.Midi.Midi) ? window.Midi.Midi : window.Midi;
   const midi = new MidiCtor(buf);
   const ppq = midi.header.ppq || 480;
@@ -315,7 +326,7 @@ function render(){
   });
   stave.innerHTML = '';
   const tbar = document.getElementById('transportbar'); if(tbar) tbar.hidden = !tracks.length;
-  const tv = document.getElementById('trval'); if(tv) tv.textContent = (transposeOffset>0?'+':'') + transposeOffset;
+  const tv = document.getElementById('trval'); if(tv){ const d = displayTranspose(); tv.textContent = (d>0?'+':'') + d; }
   const multi = tracks.length > 1;
   // During OMR review, flag very short parts (likely slips) right on the player rows.
   const suspectIds = reviewMode ? new Set(suspectParts().map(s=> s.id)) : new Set();
@@ -375,13 +386,21 @@ function render(){
     mp3.onclick = ()=> exportTrackMp3(t, mp3);
     const png = document.createElement('button'); png.innerHTML=icon('download')+'PNG'; png.title='Download this part’s solfège as an image';
     png.onclick = ()=> exportTrackPng(t);
-    btns.append(vol, mp3, png);
+    const vid = document.createElement('button'); vid.className='vvideo'; vid.innerHTML=icon('film')+'Video'; vid.title='Download this part as a video (the grid scrolls in time with the sound, shareable on WhatsApp)';
+    vid.onclick = ()=> exportTrackVideo(t, vid);
+    btns.append(vol, mp3, png, vid);
     if(t.editing){   // part-level actions live in edit mode (undoable), replacing the old Edit-tab buttons
+      const clefSel = document.createElement('select'); clefSel.className = 'clefpick'; clefSel.title = 'Clef for this part';
+      ['auto','treble','bass','alto','tenor'].forEach(c=>{
+        const o = document.createElement('option'); o.value = c; o.textContent = CLEF_LABELS[c];
+        if((t.clef || 'auto') === c) o.selected = true; clefSel.append(o);
+      });
+      clefSel.onchange = ()=>{ pushUndo(); t.clef = clefSel.value === 'auto' ? null : clefSel.value; afterEdit(); };
       const dup = document.createElement('button'); dup.className = 'duppart'; dup.textContent = 'Duplicate'; dup.title = 'Duplicate this part';
       dup.onclick = ()=> duplicatePart(t);
       const del = document.createElement('button'); del.className = 'delpart'; del.textContent = 'Delete part'; del.title = 'Delete this part';
       del.onclick = ()=>{ pushUndo(); tracks = tracks.filter(x=> x !== t); if(editSel && editSel.trackId === t.id) editSel = null; afterEdit(); };
-      btns.append(dup, del);
+      btns.append(clefSel, dup, del);
     }
     head.append(caret, vplay, lab);
     if(suspectIds.has(t.id)){
@@ -404,22 +423,53 @@ function render(){
     } else {
       const cells = document.createElement('div'); cells.className = 'stave-row';
       const selSet = t.editing ? selectionSetFor(t.id) : null;
+      const marks = phrasingMarks(t);   // slur/tie indicators on the grid (shown in play mode too)
+      // Notes joined by a slur or tie are wrapped in a no-wrap group so a phrase
+      // never breaks across grid lines (its arc stays in one piece). links.has(i)
+      // means note i connects to i+1.
+      const links = new Set([...marks.slurLinks, ...marks.tieStarts]);
+      // barlines fall at pickupBeats, +1 bar, +2 bars ... so you can see the metre
+      const bb = barBeats(), pk = pickupBeats;
+      const onBar = (x)=>{ if(!(bb>0) || x < pk - 1e-6) return false; const r = (((x-pk)%bb)+bb)%bb; return r < 1e-6 || bb - r < 1e-6; };
+      let group = null;
       t.notes.forEach((n,i)=>{
         const el = document.createElement('div');
         const sel = selSet && selSet.has(i);
-        el.className = 'note' + (n.isRest ? ' rest' : '') + (sel ? ' sel' : '');
+        el.className = 'note' + (n.isRest ? ' rest' : '') + (sel ? ' sel' : '')
+          + (marks.slurred.has(i) ? ' slurred' : '') + (marks.slurLinks.has(i) ? ' slurlink' : '')
+          + (marks.tied.has(i) ? ' tied' : '') + (marks.tieStarts.has(i) ? ' tiestart' : '');
         el.id = t.id + '-' + i;
         // in edit mode show the duration (so you can read/fix rhythm); otherwise the scale degree
         if(n.isRest){ el.innerHTML = `<span class="solf">–</span><span class="nm">rest</span>` + (t.editing ? `<span class="dur">${durAbbr(n.durBeat)}</span>` : ''); }
         else { const a = analyze(n); el.innerHTML = `<span class="solf">${a.syl}</span><span class="nm">${n.name}</span>` + (t.editing ? `<span class="dur">${durAbbr(n.durBeat)}</span>` : `<span class="deg">${a.deg}</span>`); }
         if(t.editing){ el.title = 'Click to edit · Shift-click to select a run · Cmd/Ctrl-click to toggle'; el.onclick = (e)=> selectChip(t.id, i, n, e); }
         else { el.title = 'Click to start here'; el.addEventListener('click', ()=> seek(n.startBeat, true)); }  // click-to-seek
-        cells.append(el);
+        let target;
+        if(links.has(i) || links.has(i-1)){   // part of a phrasing chain -> keep it on one line
+          if(!links.has(i-1)){ group = document.createElement('div'); group.className = 'phrasegroup'; cells.append(group); }
+          target = group;
+        } else { group = null; target = cells; }
+        target.append(el);
+        // a barline after any note that ends exactly on a bar boundary (skip the final one)
+        if(i < t.notes.length-1 && onBar((n.startBeat||0) + (n.durBeat||0))){
+          const bl = document.createElement('div'); bl.className = 'barline'; target.append(bl);
+        }
       });
       if(t.editing){
         const add = document.createElement('div'); add.className = 'note addnote'; add.textContent = '+'; add.title = 'Add a note to the end of this part';
         add.onclick = ()=>{ pushUndo(); t.notes.push(defaultNote(t.notes[t.notes.length-1])); editSel = {trackId:t.id, index:t.notes.length-1}; afterEdit(); };
         cells.append(add);
+      }
+      // incomplete-bar nudge: if the notes don't add up to whole bars (after any pickup),
+      // flag how short the last bar is, so a missed/extra beat is visible.
+      const total = t.notes.reduce((s,n)=> s + (n.durBeat||0), 0), musical = total - pk;
+      const rem = bb>0 ? ((musical % bb) + bb) % bb : 0;
+      if(bb>0 && musical > 1e-6 && rem > 1e-6 && bb - rem > 1e-6){
+        const trim = (x)=> String(+x.toFixed(3));
+        const w = document.createElement('span'); w.className = 'barwarn';
+        w.textContent = 'last bar ' + trim(rem) + '/' + trim(bb);
+        w.title = 'The last bar is not full (did you miss a beat?). If the piece starts with a pickup, select its lead-in note and click "Lead-in".';
+        cells.append(w);
       }
       row.append(cells);
     }
@@ -584,15 +634,35 @@ function computeEndBeat(){
   active.forEach(t=> t.notes.forEach(n=> endBeat = Math.max(endBeat, n.startBeat + n.durBeat)));
 }
 
+// The notes a part actually SOUNDS: tied same-pitch runs merged into one sustained
+// attack, and slurred (or tied) notes played legato (full length, no gap) so a
+// phrase doesn't sound like separate notes. `spb` = seconds per beat. Returns
+// [{name, time, dur}] in seconds.
+function playableEvents(t, spb){
+  const slurred = phrasingMarks(t).slurred;
+  const notes = t.notes || [], out = [];
+  for(let i=0;i<notes.length;i++){
+    const n = notes[i]; if(n.isRest) continue;
+    let j = i, durBeats = n.durBeat;
+    while(notes[j].tieNext && notes[j+1] && !notes[j+1].isRest && notes[j+1].midi === notes[j].midi){
+      j++; durBeats += notes[j].durBeat;   // merge the tied run into one held note
+    }
+    const legato = i !== j || slurred.has(i);   // tied group OR under a slur -> no gap
+    out.push({ name:n.name, time:n.startBeat*spb, dur:Math.max(0.05, durBeats*spb*(legato ? 1 : 0.95)) });
+    i = j;
+  }
+  return out;
+}
+
 function buildPart(){
   if(part){ part.dispose(); part=null; }
   bs = 60 / parseInt(document.getElementById('bpm').value);
   const active = activeTracks();
   const events = []; endBeat = 0;
-  active.forEach(t=> t.notes.forEach(n=>{
-    endBeat = Math.max(endBeat, n.startBeat + n.durBeat);
-    if(!n.isRest) events.push({time:n.startBeat*bs, note:n.name, dur:Math.max(0.05, n.durBeat*bs*0.95), trackId:t.id});
-  }));
+  active.forEach(t=>{
+    t.notes.forEach(n=> endBeat = Math.max(endBeat, n.startBeat + n.durBeat));
+    playableEvents(t, bs).forEach(e=> events.push({time:e.time, note:e.name, dur:e.dur, trackId:t.id}));
+  });
   part = new Tone.Part((time, ev)=>{
     const tr = trackById(ev.trackId);
     instrument().triggerAttackRelease(ev.note, ev.dur, time, tr && tr.vol != null ? tr.vol : 1);   // per-part volume = velocity
@@ -852,7 +922,7 @@ async function renderTracksToBuffer(trackList){
     }
     trackList.forEach(t=>{
       const vel = t.vol != null ? t.vol : 1;
-      t.notes.forEach(n=>{ if(!n.isRest) inst.triggerAttackRelease(n.name, Math.max(0.05, n.durBeat*eb*0.95), n.startBeat*eb, vel); });
+      playableEvents(t, eb).forEach(e=> inst.triggerAttackRelease(e.name, e.dur, e.time, vel));   // honour ties/slurs
     });
   }, end + 0.8, 1);   // 1 = mono
 }
@@ -955,8 +1025,376 @@ function exportTrackPng(track, dest){
       g.fillStyle='#8c2f2a'; g.font='11px "JetBrains Mono", monospace'; g.fillText('deg ' + a.deg, x, y+64);
     }
   });
+  // slur (over, green) + tie (under, red) arcs, same as the grid/staff show
+  const cx = (i)=> padX + (i % perRow)*cw + cw/2, cy = (i)=> padTop + Math.floor(i/perRow)*ch;
+  const sameRow = (i,j)=> Math.floor(i/perRow) === Math.floor(j/perRow);
+  const arc = (i,j,yOff,peak,color)=>{ const a=cx(i),b=cx(j),ya=cy(i)+yOff,yb=cy(j)+yOff; g.strokeStyle=color; g.lineWidth=2.4; g.beginPath(); g.moveTo(a,ya); g.quadraticCurveTo((a+b)/2, ya+peak, b, yb); g.stroke(); };
+  const marks = phrasingMarks(track);
+  notes.forEach((n,i)=>{ if(n.tieNext && notes[i+1] && sameRow(i,i+1)) arc(i, i+1, 56, 8, '#8c2f2a'); });   // tie: shallow curve under
+  let s = -1;                                                                                                  // slur: arc over each same-row run
+  for(let i=0;i<=notes.length;i++){
+    const inS = marks.slurred.has(i);
+    if(inS && s<0) s = i;
+    if((!inS || i===notes.length) && s>=0){
+      let a = s; const end = i-1;
+      while(a < end){ let r = a; while(r+1<=end && sameRow(a,r+1)) r++; if(r>a) arc(a, r, 6, -14, '#2f6b5f'); a = r+1; }
+      s = -1;
+    }
+  }
   const name = safeName(exportBase(track)) + '.png';
   return new Promise(r=> cv.toBlob(async b=>{ await deliver(b, name, dest, {desc:'PNG image', mime:'image/png', ext:['.png']}); r(); }, 'image/png'));
+}
+
+// Render ONE part's engraved staff (OSMD) offscreen and save it as a PNG - so the
+// per-part sheet is exportable, not just the solfège grid.
+async function exportTrackSheetPng(track, dest){
+  if(!window.opensheetmusicdisplay){ alert('Sheet renderer not loaded (check your connection).'); return; }
+  const box = document.createElement('div');
+  box.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px;background:#fff';
+  document.body.appendChild(box);
+  try{
+    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:true}));
+    await inst.load(partXML(track));
+    if(partFromOriginal(track) && transposeOffset) applyTransposeTo(inst);   // serializer already carries the transpose
+    inst.render();
+    const cv = await scoreToCanvas([...box.querySelectorAll('svg')], 2);
+    const blob = await new Promise(r=> cv.toBlob(r, 'image/png'));
+    await deliver(blob, safeName(exportBase(track)) + '.png', dest, {desc:'PNG image', mime:'image/png', ext:['.png']});
+  }catch(e){ alert('Sheet PNG export failed: ' + e.message); }
+  finally{ box.remove(); }
+}
+// Export a part as a PNG of whatever it's currently showing: the engraved staff in
+// Sheet view, else the solfège grid.
+function exportTrackVisual(track, dest){
+  if(track.view === 'sheet' && canSheet(track)) return exportTrackSheetPng(track, dest);
+  return exportTrackPng(track, dest);
+}
+
+/* ---------- animated video (grid scrolls in time with the sound) ----------
+   Records a canvas "karaoke" strip of the solfège grid (one lane per part, each
+   scrolling so the sounding note sits under a centre playhead) together with the
+   offline-rendered audio, into a single shareable clip. Prefers MP4/H.264 so it
+   previews on WhatsApp; falls back to WebM where MP4 recording isn't available.
+   Recording is real-time (a 30s piece takes ~30s). */
+const VIDEO_FPS = 30;
+function videoDims(parts, withSheet){
+  const W = 760, cw = 104, titleH = 50, laneH = 134, padBot = 22;
+  const sheetH = withSheet ? 240 : 0;   // an extra scrolling staff lane (single-track videos only)
+  let H = titleH + parts.length * laneH + sheetH + padBot;
+  if(H % 2) H++;                        // H.264 needs even dimensions
+  return { W, H, cw, titleH, laneH, padBot, sheetH };
+}
+// Render a part's staff on ONE horizontal line offscreen, rasterise it, and map each
+// notehead's beat to its x in the image - so the staff can scroll in sync in a video lane.
+// Returns {img, w, h, pts:[{beat,x}]} or null if it can't (no OSMD / wrapped / empty).
+async function prepareSheetStrip(track){
+  if(!window.opensheetmusicdisplay || !canSheet(track)) return null;
+  let maxBeat = 0; (track.notes||[]).forEach(n=> maxBeat = Math.max(maxBeat, (n.startBeat||0)+(n.durBeat||0)));
+  const box = document.createElement('div');
+  box.style.cssText = 'position:absolute;left:-100000px;top:0;width:' + Math.max(1400, Math.round(maxBeat*150)) + 'px;background:#f4efe6';
+  document.body.appendChild(box);
+  try{
+    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:false}));
+    try{ inst.EngravingRules.RenderSingleHorizontalStaffline = true; }catch(_){}   // keep it on one line (newer OSMD)
+    try{ inst.zoom = 1.6; }catch(_){}   // render larger so the staff stays crisp when scaled up in the lane
+    await inst.load(partXML(track));
+    if(partFromOriginal(track) && transposeOffset) applyTransposeTo(inst);
+    inst.render();
+    tagSheetNotes(inst, track.id);
+    const svg = box.querySelector('svg'); if(!svg) return null;
+    const pts = [];
+    svg.querySelectorAll('.sheetnote[data-b0]').forEach(el=>{
+      const b0 = parseFloat(el.dataset.b0); if(!isFinite(b0)) return;
+      let bb; try{ bb = el.getBBox(); }catch(_){ bb = null; }
+      if(bb) pts.push({ beat: b0, x: bb.x + bb.width/2, bx: bb.x, y: bb.y, w: bb.width, h: bb.height });   // x = centre (alignment); bbox = green highlight
+    });
+    pts.sort((a,b)=> a.beat - b.beat);
+    if(pts.length < 1) return null;
+    for(let i=1;i<pts.length;i++) if(pts[i].x < pts[i-1].x - 4) return null;   // x went backwards -> it wrapped, bail
+    const { img, w, h } = await svgToImage(svg);
+    return { img, w, h, pts };
+  }catch(_){ return null; }
+  finally{ box.remove(); }
+}
+function beatToStaffX(sheet, beat){
+  const pts = sheet.pts;
+  if(beat <= pts[0].beat) return pts[0].x;
+  const lastP = pts[pts.length-1];
+  if(beat >= lastP.beat) return lastP.x;
+  for(let i=0;i<pts.length-1;i++){
+    if(beat <= pts[i+1].beat){
+      const span = (pts[i+1].beat - pts[i].beat) || 1;
+      return pts[i].x + (beat - pts[i].beat)/span * (pts[i+1].x - pts[i].x);
+    }
+  }
+  return lastP.x;
+}
+function drawSheetLane(g, sheet, beat, dims, top){
+  const { W, sheetH } = dims, playheadX = W/2;
+  g.fillStyle = '#2f6b5f'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.font = '600 14px Fraunces, serif'; g.fillText('Sheet', 16, top + 18);
+  const padTop = 26, drawH = sheetH - padTop - 8, scale = drawH / sheet.h;
+  const staffX = beatToStaffX(sheet, beat);
+  const imgX = playheadX - staffX*scale;
+  g.save(); g.beginPath(); g.rect(0, top, W, sheetH); g.clip();
+  g.drawImage(sheet.img, imgX, top + padTop, sheet.w*scale, sheet.h*scale);
+  g.restore();
+  // recolour the currently-sounding note green (matches the grid's active note + the staff "playing" highlight)
+  const pts = sheet.pts; let ci = -1;
+  for(let i=0;i<pts.length;i++){ if(beat + 1e-6 >= pts[i].beat) ci = i; else break; }
+  if(ci >= 0){
+    const p = pts[ci], pad = 2;
+    const x0 = Math.max(0, Math.floor(imgX + p.bx*scale) - pad), y0 = Math.max(top, Math.floor(top + padTop + p.y*scale) - pad);
+    const x1 = Math.min(W, Math.ceil(imgX + (p.bx+p.w)*scale) + pad), y1 = Math.min(top + sheetH, Math.ceil(top + padTop + (p.y+p.h)*scale) + pad);
+    if(x1 > x0 && y1 > y0){
+      const id = g.getImageData(x0, y0, x1-x0, y1-y0), d = id.data;
+      for(let k=0;k<d.length;k+=4){
+        const lum = 0.299*d[k] + 0.587*d[k+1] + 0.114*d[k+2];
+        if(d[k+3] > 30 && lum < 150){ d[k]=0x2f; d[k+1]=0x6b; d[k+2]=0x5f; }   // ink pixels -> accent2 green
+      }
+      g.putImageData(id, x0, y0);
+    }
+  }
+  g.strokeStyle = 'rgba(140,47,42,0.55)'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(playheadX, top + padTop - 4); g.lineTo(playheadX, top + sheetH - 6); g.stroke();
+}
+function roundRectPath(g, x, y, w, h, r){
+  if(g.roundRect){ g.beginPath(); g.roundRect(x, y, w, h, r); return; }
+  g.beginPath(); g.moveTo(x+r, y); g.arcTo(x+w, y, x+w, y+h, r); g.arcTo(x+w, y+h, x, y+h, r);
+  g.arcTo(x, y+h, x, y, r); g.arcTo(x, y, x+w, y, r); g.closePath();
+}
+function videoArc(g, ax, bx, yBase, peak, color){
+  g.strokeStyle = color; g.lineWidth = 2.6;
+  g.beginPath(); g.moveTo(ax, yBase); g.quadraticCurveTo((ax+bx)/2, yBase + peak, bx, yBase); g.stroke();
+}
+function drawVideoCell(g, n, active, x, y, w, h){
+  g.fillStyle = active ? '#2f6b5f' : '#ece5d8';
+  roundRectPath(g, x, y, w, h, 10); g.fill();
+  g.textAlign = 'center'; const mid = x + w/2;
+  if(!n) return;
+  if(n.isRest){
+    g.fillStyle = active ? 'rgba(244,239,230,0.9)' : '#b3a392';
+    g.font = '600 26px Fraunces, serif'; g.fillText('–', mid, y + 40);
+    g.font = '13px "JetBrains Mono", monospace'; g.fillText('rest', mid, y + 66);
+  } else {
+    const a = analyze(n);
+    g.fillStyle = active ? '#f4efe6' : '#2f6b5f';
+    g.font = '600 30px Fraunces, serif'; g.fillText(a.syl, mid, y + 42);
+    g.fillStyle = active ? 'rgba(244,239,230,0.85)' : '#736959';
+    g.font = '13px "JetBrains Mono", monospace'; g.fillText(n.name, mid, y + 66);
+    g.fillStyle = active ? 'rgba(244,239,230,0.7)' : '#8c2f2a';
+    g.font = '11px "JetBrains Mono", monospace'; g.fillText('deg ' + a.deg, mid, y + 84);
+  }
+}
+function drawVideoLane(g, t, beat, dims, top, playheadX){
+  const { W, cw, laneH } = dims;
+  const notes = t.notes || [];
+  g.fillStyle = '#2f6b5f'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.font = '600 14px Fraunces, serif'; g.fillText(t.label || 'Voice', 16, top + 20);
+  const cellY = top + 30, cellH = 92, cellW = cw - 12;
+  // the sounding note: last note whose onset has passed
+  let idx = 0; for(let i=0;i<notes.length;i++){ if(beat + 1e-6 >= notes[i].startBeat) idx = i; else break; }
+  const n = notes[idx];
+  const frac = (n && n.durBeat) ? Math.max(0, Math.min(1, (beat - n.startBeat)/n.durBeat)) : 0;
+  const originX = playheadX - (idx + frac + 0.5) * cw;   // scroll so the active note sits at the playhead
+  g.save(); g.beginPath(); g.rect(0, top, W, laneH); g.clip();
+  const first = Math.max(0, Math.floor((-originX)/cw) - 1);
+  const last = Math.min(notes.length - 1, Math.ceil((W - originX)/cw) + 1);
+  for(let i=first;i<=last;i++) drawVideoCell(g, notes[i], i === idx, originX + i*cw + 6, cellY, cellW, cellH);
+  const marks = phrasingMarks(t), cx = (i)=> originX + i*cw + cw/2;
+  for(let i=first;i<=last;i++){
+    if(marks.slurLinks.has(i)) videoArc(g, cx(i), cx(i+1), cellY - 4, -16, '#2f6b5f');   // slur over
+    if(marks.tieStarts.has(i)) videoArc(g, cx(i), cx(i+1), cellY + cellH + 6, 12, '#8c2f2a'); // tie under
+  }
+  g.restore();
+  g.strokeStyle = 'rgba(140,47,42,0.55)'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(playheadX, top + 24); g.lineTo(playheadX, top + laneH - 6); g.stroke();
+}
+function drawVideoFrame(g, parts, beat, dims, sheet){
+  g.fillStyle = '#f4efe6'; g.fillRect(0, 0, dims.W, dims.H);
+  g.fillStyle = '#211c16'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.font = '600 22px Fraunces, Georgia, serif';
+  g.fillText((pieceName || 'Solfege') + '  (' + currentKeyName() + ')', 18, 32);
+  const playheadX = dims.W / 2;
+  parts.forEach((t, pi)=> drawVideoLane(g, t, beat, dims, dims.titleH + pi*dims.laneH, playheadX));
+  if(sheet && dims.sheetH) drawSheetLane(g, sheet, beat, dims, dims.titleH + parts.length*dims.laneH);
+}
+// Pick the most shareable container the browser can actually record (MP4 first).
+function pickVideoMime(){
+  const cands = [
+    { type:'video/mp4;codecs="avc1.42E01E,mp4a.40.2"', ext:'.mp4', desc:'MP4 video', mime:'video/mp4' },
+    { type:'video/mp4', ext:'.mp4', desc:'MP4 video', mime:'video/mp4' },
+    { type:'video/webm;codecs=vp9,opus', ext:'.webm', desc:'WebM video', mime:'video/webm' },
+    { type:'video/webm;codecs=vp8,opus', ext:'.webm', desc:'WebM video', mime:'video/webm' },
+    { type:'video/webm', ext:'.webm', desc:'WebM video', mime:'video/webm' },
+  ];
+  for(const c of cands){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(c.type)) return c; }catch(_){} }
+  return { type:'', ext:'.webm', desc:'WebM video', mime:'video/webm' };
+}
+const MP4_MIME = { ext:'.mp4', desc:'MP4 video', mime:'video/mp4' };
+// Ask WHERE to save up front (single-file exports), while the click's user activation
+// is still valid. Bulk loops pass `dest` (a folder handle or 'download') and skip this.
+// Returns {fileHandle} / {dest} / null (cancelled).
+async function acquireVideoDest(baseName, mime, dest){
+  if(dest) return { dest };
+  if(window.showSaveFilePicker){
+    try{ return { fileHandle: await window.showSaveFilePicker({ suggestedName: baseName + mime.ext, types:[{ description: mime.desc, accept: { [mime.mime]: [mime.ext] } }] }) }; }
+    catch(e){ if(e && e.name === 'AbortError') return null; return { dest:'download' }; }
+  }
+  return { dest:'download' };
+}
+async function saveVideo(blob, baseName, mime, target){
+  if(target.fileHandle){ const w = await target.fileHandle.createWritable(); await w.write(blob); await w.close(); }
+  else await deliver(blob, baseName + mime.ext, target.dest, { desc: mime.desc, mime: mime.mime, ext: [mime.ext] });
+}
+// WebCodecs offline path available? (encodes faster than real-time, immune to focus/throttling.)
+const WC_VCODEC = 'avc1.42002A';   // H.264 Baseline, level 4.2 - handles tall multi-part frames
+async function canWebCodecs(W, H){
+  if(!(window.VideoEncoder && window.AudioEncoder && window.VideoFrame && window.AudioData && window.Mp4Muxer && window.Mp4Muxer.Muxer)) return false;
+  try{
+    const v = await VideoEncoder.isConfigSupported({ codec: WC_VCODEC, width: W, height: H, bitrate: 4000000, framerate: VIDEO_FPS });
+    const a = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 44100, numberOfChannels: 1, bitrate: 128000 });
+    return !!(v && v.supported && a && a.supported);
+  }catch(_){ return false; }
+}
+
+// Public entry: export `parts` (one lane each) as a video. Prefers the WebCodecs
+// offline render (fast, focus-proof, MP4); falls back to the real-time MediaRecorder.
+async function recordVideo(parts, baseName, btn, dest){
+  const usable = (parts || []).filter(t=> t.notes && t.notes.some(n=> !n.isRest));
+  if(!usable.length){ alert('Nothing to record yet, add some notes first.'); return; }
+  if(isPlaying) stopPlayback();
+  // Single-track videos (per-part, and each "All parts" clip) get a second lane: the
+  // engraved staff scrolling in sync underneath. The full mix (many parts) skips it.
+  const sheet = (parts.length === 1) ? await prepareSheetStrip(parts[0]) : null;
+  const dims = videoDims(parts, !!sheet);
+  const wc = await canWebCodecs(dims.W, dims.H);
+  const realtimeOK = !!(window.MediaRecorder && document.createElement('canvas').captureStream);
+  if(!wc && !realtimeOK){ alert('This browser cannot record video here. Try the latest Chrome.'); return; }
+  const mime = wc ? MP4_MIME : pickVideoMime();
+  const target = await acquireVideoDest(baseName, mime, dest);
+  if(!target) return;   // user cancelled the Save dialog
+  if(wc) await recordVideoOffline(parts, dims, baseName, target, btn, sheet);
+  else await recordVideoRealtime(parts, dims, baseName, mime, target, btn, sheet);
+}
+
+// Offline render: draw every frame and encode it (H.264) + the rendered audio (AAC),
+// mux to MP4. Not tied to wall-clock, so it's faster than real-time and never freezes
+// when the tab loses focus. No sound plays during this (it's not a live capture).
+async function recordVideoOffline(parts, dims, baseName, target, btn, sheet){
+  const orig = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Rendering audio...'; }
+  try{
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    const ab = (await renderTracksToBuffer(parts)).get();
+    const fps = VIDEO_FPS, totalSec = ab.duration, totalFrames = Math.max(1, Math.ceil(totalSec * fps));
+    const { Muxer, ArrayBufferTarget } = window.Mp4Muxer;
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: { codec: 'avc', width: dims.W, height: dims.H },
+      audio: { codec: 'aac', numberOfChannels: ab.numberOfChannels, sampleRate: ab.sampleRate },
+      fastStart: 'in-memory',
+    });
+    const vEnc = new VideoEncoder({ output: (c,m)=> muxer.addVideoChunk(c,m), error: (e)=>{ throw e; } });
+    vEnc.configure({ codec: WC_VCODEC, width: dims.W, height: dims.H, bitrate: 4000000, framerate: fps });
+    const cv = document.createElement('canvas'); cv.width = dims.W; cv.height = dims.H;
+    const g = cv.getContext('2d');
+    const usPerFrame = 1000000 / fps;
+    if(btn) btn.textContent = 'Rendering video...';
+    for(let i=0;i<totalFrames;i++){
+      drawVideoFrame(g, parts, (i/fps)/spb, dims, sheet);
+      const frame = new VideoFrame(cv, { timestamp: Math.round(i*usPerFrame), duration: Math.round(usPerFrame) });
+      vEnc.encode(frame, { keyFrame: i % (fps*2) === 0 });
+      frame.close();
+      if(vEnc.encodeQueueSize > 30) await new Promise(r=> setTimeout(r, 0));   // backpressure: let the encoder drain
+      if(btn && i % 15 === 0) btn.textContent = 'Rendering ' + Math.round(100*i/totalFrames) + '%';
+    }
+    await vEnc.flush();
+    const aEnc = new AudioEncoder({ output: (c,m)=> muxer.addAudioChunk(c,m), error: (e)=>{ throw e; } });
+    aEnc.configure({ codec: 'mp4a.40.2', sampleRate: ab.sampleRate, numberOfChannels: ab.numberOfChannels, bitrate: 128000 });
+    const ch = ab.numberOfChannels, sr = ab.sampleRate, block = 4096;
+    for(let off=0; off<ab.length; off+=block){
+      const n = Math.min(block, ab.length - off);
+      const data = new Float32Array(n*ch);
+      for(let c=0;c<ch;c++){ const cd = ab.getChannelData(c); for(let k=0;k<n;k++) data[k*ch+c] = cd[off+k]; }   // interleaved f32
+      const ad = new AudioData({ format:'f32', sampleRate: sr, numberOfFrames: n, numberOfChannels: ch, timestamp: Math.round(off/sr*1000000), data });
+      aEnc.encode(ad); ad.close();
+    }
+    await aEnc.flush();
+    muxer.finalize();
+    if(btn) btn.textContent = 'Saving...';
+    await saveVideo(new Blob([muxer.target.buffer], { type:'video/mp4' }), baseName, MP4_MIME, target);
+  }catch(e){ alert('Video export failed: ' + e.message); }
+  finally{ if(btn){ btn.innerHTML = orig; btn.disabled = false; } }
+}
+
+// Fallback: real-time capture via MediaRecorder (canvas stream + rendered audio).
+async function recordVideoRealtime(parts, dims, baseName, mime, target, btn, sheet){
+  const orig = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Rendering audio...'; }
+  let actx = null;
+  try{
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    const ab = (await renderTracksToBuffer(parts)).get();
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = actx.createBuffer(ab.numberOfChannels, ab.length, ab.sampleRate);
+    for(let c=0;c<ab.numberOfChannels;c++) buf.copyToChannel(ab.getChannelData(c), c);
+    const src = actx.createBufferSource(); src.buffer = buf;
+    const msDest = actx.createMediaStreamDestination();
+    src.connect(msDest); src.connect(actx.destination);   // route to speakers too, so you preview it as it records
+    const totalSec = ab.duration;
+    const cv = document.createElement('canvas'); cv.width = dims.W; cv.height = dims.H;
+    const g = cv.getContext('2d');
+    drawVideoFrame(g, parts, 0, dims, sheet);
+    const vstream = cv.captureStream(VIDEO_FPS);
+    const vtrack = vstream.getVideoTracks()[0];
+    const pushFrame = (vtrack && typeof vtrack.requestFrame === 'function') ? ()=> vtrack.requestFrame() : ()=>{};
+    const stream = new MediaStream([...vstream.getVideoTracks(), ...msDest.stream.getAudioTracks()]);
+    const recOpts = { videoBitsPerSecond: 4000000 }; if(mime.type) recOpts.mimeType = mime.type;
+    const rec = new MediaRecorder(stream, recOpts);
+    const chunks = []; rec.ondataavailable = e=>{ if(e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(res=> rec.onstop = res);
+    const t0 = actx.currentTime + 0.12;
+    rec.start(); src.start(t0);
+    // Drive the animation off a timer tied to the audio clock, NOT requestAnimationFrame
+    // (rAF pauses to 0fps when the window loses focus, freezing the canvas mid-record).
+    await new Promise(resolve=>{
+      const tick = ()=>{
+        const elapsed = actx.currentTime - t0;
+        drawVideoFrame(g, parts, Math.max(0, elapsed) / spb, dims, sheet);
+        pushFrame();
+        if(btn) btn.textContent = 'Recording ' + Math.min(Math.ceil(Math.max(0, elapsed)), Math.ceil(totalSec)) + '/' + Math.ceil(totalSec) + 's';
+        if(elapsed >= totalSec + 0.15){ clearInterval(timer); resolve(); }
+      };
+      const timer = setInterval(tick, 1000 / VIDEO_FPS);
+      tick();
+    });
+    if(rec.state !== 'inactive') rec.stop();
+    await stopped;
+    if(btn) btn.textContent = 'Saving...';
+    await saveVideo(new Blob(chunks, { type: mime.mime }), baseName, mime, target);
+  }catch(e){ alert('Video export failed: ' + e.message); }
+  finally{ try{ if(actx) actx.close(); }catch(_){} if(btn){ btn.innerHTML = orig; btn.disabled = false; } }
+}
+async function exportTrackVideo(track, btn, dest){ await recordVideo([track], safeName(exportBase(track)), btn, dest); }
+// One separate clip per part (real-time each), all into a folder picked once. This
+// differs from the full mix (a single clip of every part stacked together).
+async function exportAllVideo(btn){
+  if(!tracks.length) return;
+  const dir = await pickExportDir();
+  if(dir === 'cancel') return;                  // user backed out of the folder picker
+  const dest = dir || 'download';               // a folder if picked, else straight to Downloads
+  const orig = btn.innerHTML; btn.disabled = true;
+  for(let i=0;i<tracks.length;i++){
+    btn.textContent = `Recording part ${i+1}/${tracks.length}...`;
+    await exportTrackVideo(tracks[i], null, dest);
+  }
+  btn.innerHTML = orig; btn.disabled = false;
+}
+async function exportMixVideo(btn){
+  const audible = tracks.filter(t=> soloActive ? t.solo : t.enabled);
+  if(!audible.length){ alert('No audible parts to record.'); return; }
+  await recordVideo(audible, safeName((pieceName ? pieceName + '-' : '') + 'full-mix'), btn);
 }
 
 /* ---------- sheet music ---------- */
@@ -966,7 +1404,8 @@ let osmd = null, sheetReady = false, voiceOsmd = [], voiceSheetsReady = false;
 // (set in CSS) so the staves match the rest of the UI instead of black-on-white.
 // autoResize is OFF: OSMD's resize-driven redraw silently wipes the highlight
 // classes we add to noteheads (and the edit preview already relies on this).
-function OSMD_OPTS(extra){ return Object.assign({autoResize:false, backend:'svg', defaultColorMusic:'#211c16'}, extra||{}); }
+let showBeams = true;   // user toggle: join eighth/shorter note tails with beams (else show individual flags)
+function OSMD_OPTS(extra){ return Object.assign({autoResize:false, backend:'svg', defaultColorMusic:'#211c16', autoBeam:showBeams}, extra||{}); }
 
 function applyTransposeTo(inst){
   try{
@@ -976,8 +1415,9 @@ function applyTransposeTo(inst){
   }catch(_){}
 }
 function updateSheetBadges(){
-  const txt = transposeOffset ? `Transposed ${transposeOffset>0?'+':''}${transposeOffset} → sounds in ${currentKeyName().replace(' major','')}` : '';
-  const set = (id, ready)=>{ const el=document.getElementById(id); if(!el) return; el.hidden = !(ready && transposeOffset); el.textContent = txt; };
+  const d = displayTranspose();
+  const txt = d ? `Transposed ${d>0?'+':''}${d} → sounds in ${currentKeyName().replace(' major','')}` : '';
+  const set = (id, ready)=>{ const el=document.getElementById(id); if(!el) return; el.hidden = !(ready && d); el.textContent = txt; };
   set('scorebadge', sheetReady); set('voicesbadge', voiceSheetsReady);
 }
 // Wipe rendered sheets when the music changes (they'd be stale).
@@ -1029,19 +1469,29 @@ function pitchXML(n){
 // totalMeasures pads this part to the score-wide length with trailing rest bars,
 // so all parts share a measure count (OSMD renders only up to the shortest part,
 // which would otherwise truncate the preview/exports to the shortest voice).
-function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures){
+function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures, pickupTicks){
+  const pk = pickupTicks || 0;   // a short first (pickup) measure of pk ticks, then full measures
+  // measure index of a tick position, and the next barline at/after it, with the pickup offset
+  const mIndex = (s)=> (pk && s < pk) ? 0 : (pk ? 1 : 0) + Math.floor((s - pk)/measureTicks);
+  const nextBoundary = (s)=> (pk && s < pk) ? pk : pk + (Math.floor((s - pk)/measureTicks)+1)*measureTicks;
   // sort + fill gaps with rests so the timeline is contiguous from 0
   const ev = notes.slice().sort((a,b)=> a.startBeat - b.startBeat);
-  const seq = []; let cursor = 0;
+  const seq = []; let cursor = 0, prevTie = false;   // prevTie: previous note is tied into this one
   ev.forEach(n=>{
     const start = Math.round(n.startBeat*XDIV), dur = Math.max(1, Math.round(n.durBeat*XDIV));
-    if(start > cursor + 1) seq.push({rest:true, start:cursor, ticks:start-cursor});
-    seq.push({rest:!!n.isRest, start, ticks:dur, step:n.step, alter:n.alter, oct:n.oct});
+    if(start > cursor + 1){ seq.push({rest:true, start:cursor, ticks:start-cursor}); prevTie = false; }  // a gap breaks a tie
+    seq.push({rest:!!n.isRest, start, ticks:dur, step:n.step, alter:n.alter, oct:n.oct,
+      slurStart:!!n.slurStart, slurStop:!!n.slurStop,
+      tieNext:!!n.tieNext && !n.isRest, tiePrev:prevTie && !n.isRest});   // user ties/slurs
+    prevTie = !!n.tieNext && !n.isRest;
     cursor = Math.max(cursor, start + dur);
   });
-  if(!seq.length) seq.push({rest:true, start:0, ticks:measureTicks});
-  // pad the final measure out to a barline with a rest
-  const total = Math.ceil(cursor / measureTicks) * measureTicks || measureTicks;
+  if(!seq.length) seq.push({rest:true, start:0, ticks: pk || measureTicks});
+  // pad the final measure out to a barline with a rest (respecting the pickup offset)
+  let total;
+  if(cursor <= pk) total = pk || measureTicks;
+  else total = pk + Math.ceil((cursor - pk)/measureTicks)*measureTicks;
+  if(!total) total = measureTicks;
   if(cursor < total) seq.push({rest:true, start:cursor, ticks:total-cursor});
 
   const measures = [];               // measures[m] = array of <note> strings
@@ -1050,9 +1500,8 @@ function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures){
     // split the event at measure boundaries
     const frags = []; let s = e.start, end = e.start + e.ticks;
     while(s < end){
-      const mEnd = (Math.floor(s/measureTicks)+1)*measureTicks;
-      const segEnd = Math.min(end, mEnd);
-      frags.push({m:Math.floor(s/measureTicks), ticks:segEnd - s});
+      const segEnd = Math.min(end, nextBoundary(s));
+      frags.push({m:mIndex(s), ticks:segEnd - s});
       s = segEnd;
     }
     // each fragment decomposes into note values; pitched notes tie across all sub-notes
@@ -1062,10 +1511,15 @@ function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures){
       if(e.rest){
         put(sub.m, `<note><rest/><duration>${sub.d.ticks}</duration><voice>1</voice>${noteTypeXML(sub.d)}</note>`);
       } else {
-        const tieStart = i < subs.length-1, tieStop = i > 0;
+        // tie across auto-split sub-notes AND across user ties (tieNext on the last sub, tiePrev on the first)
+        const tieStart = (i < subs.length-1) || (i === subs.length-1 && e.tieNext);
+        const tieStop  = (i > 0) || (i === 0 && e.tiePrev);
         const ties = (tieStop?'<tie type="stop"/>':'') + (tieStart?'<tie type="start"/>':'');
         const tied = (tieStop?'<tied type="stop"/>':'') + (tieStart?'<tied type="start"/>':'');
-        const notations = tied ? `<notations>${tied}</notations>` : '';
+        let slur = '';
+        if(e.slurStart && i === 0) slur += '<slur number="1" type="start"/>';
+        if(e.slurStop && i === subs.length-1) slur += '<slur number="1" type="stop"/>';
+        const notations = (tied || slur) ? `<notations>${tied}${slur}</notations>` : '';
         put(sub.m, `<note>${pitchXML(e)}<duration>${sub.d.ticks}</duration>${ties}<voice>1</voice>${noteTypeXML(sub.d)}${notations}</note>`);
       }
     });
@@ -1073,10 +1527,29 @@ function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures){
   const count = Math.max(measures.length || 1, totalMeasures || 1);
   let xml = '';
   for(let m=0; m<count; m++){
-    const body = (measures[m] || [`<note><rest measure="yes"/><duration>${measureTicks}</duration><voice>1</voice></note>`]).join('');
-    xml += `<measure number="${m+1}">${m===0 ? attrsXML : ''}${body}</measure>`;
+    const fillTicks = (pk && m===0) ? pk : measureTicks;   // an empty pickup bar is only pk long
+    const body = (measures[m] || [`<note><rest measure="yes"/><duration>${fillTicks}</duration><voice>1</voice></note>`]).join('');
+    const implicit = (pk && m===0) ? ' implicit="yes"' : '';   // a pickup measure isn't counted/numbered as a full bar
+    xml += `<measure number="${m+1}"${implicit}>${m===0 ? attrsXML : ''}${body}</measure>`;
   }
   return xml;
+}
+
+// Per-part clefs. A track's `clef` (treble/bass/alto/tenor) is captured on import
+// and settable in edit mode; when unset we fall back to the pitch-average guess,
+// so a part never silently flips clef just because you edited its notes.
+const CLEFS = { treble:{sign:'G',line:2}, bass:{sign:'F',line:4}, alto:{sign:'C',line:3}, tenor:{sign:'C',line:4} };
+const CLEF_LABELS = { auto:'Auto clef', treble:'Treble', bass:'Bass', alto:'Alto', tenor:'Tenor' };
+function clefNameFrom(sign, line){
+  for(const [name,c] of Object.entries(CLEFS)){ if(c.sign === sign && String(c.line) === String(line)) return name; }
+  return null;
+}
+function clefXML(t){
+  const c = CLEFS[t && t.clef];
+  if(c) return `<clef><sign>${c.sign}</sign><line>${c.line}</line></clef>`;
+  const pitched = (t.notes||[]).filter(n=> !n.isRest);
+  const avg = pitched.length ? pitched.reduce((s,n)=> s+n.midi, 0)/pitched.length : 71;
+  return avg >= 60 ? '<clef><sign>G</sign><line>2</line></clef>' : '<clef><sign>F</sign><line>4</line></clef>';
 }
 
 // Build a full <score-partwise> from the current tracks (one part each).
@@ -1089,21 +1562,23 @@ function tracksToMusicXML(opts){
   const title = (opts.title != null ? opts.title : pieceName) || 'Untitled';
   const esc = s=> String(s).replace(/[<&>]/g, c=> ({'<':'&lt;','&':'&amp;','>':'&gt;'}[c]));
 
+  const pickupTicks = Math.round((opts.pickupBeats != null ? opts.pickupBeats : pickupBeats) * XDIV);
+
   // Size the score to the longest voice, so shorter voices get trailing rest bars
   // rather than truncating the whole render to the shortest voice's length.
   let maxTick = 0;
   list.forEach(t=> t.notes.forEach(n=> maxTick = Math.max(maxTick, Math.round((n.startBeat + n.durBeat) * XDIV))));
-  const totalMeasures = Math.max(1, Math.ceil(maxTick / measureTicks));
+  const totalMeasures = pickupTicks > 0
+    ? 1 + Math.max(0, Math.ceil((maxTick - pickupTicks) / measureTicks))   // pickup measure + full measures
+    : Math.max(1, Math.ceil(maxTick / measureTicks));
 
   let partList = '', partsXML = '';
   list.forEach((t,i)=>{
     const id = 'P'+(i+1);
     partList += `<score-part id="${id}"><part-name>${esc(t.label||('Voice '+(i+1)))}</part-name></score-part>`;
-    const pitched = t.notes.filter(n=> !n.isRest);
-    const avg = pitched.length ? pitched.reduce((s,n)=> s+n.midi, 0)/pitched.length : 71;
-    const clef = avg >= 60 ? '<clef><sign>G</sign><line>2</line></clef>' : '<clef><sign>F</sign><line>4</line></clef>';
+    const clef = clefXML(t);
     const attrs = `<attributes><divisions>${XDIV}</divisions><key><fifths>${fifths}</fifths></key><time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>${clef}</attributes>`;
-    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs, totalMeasures)}</part>`;
+    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs, totalMeasures, pickupTicks)}</part>`;
   });
   return `<?xml version="1.0" encoding="UTF-8"?>\n<score-partwise version="3.1"><work><work-title>${esc(title)}</work-title></work><part-list>${partList}</part-list>${partsXML}</score-partwise>`;
 }
@@ -1130,7 +1605,7 @@ async function renderScoreOffscreen(){
   box.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px;background:#fff';
   document.body.appendChild(box);
   try{
-    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {backend:'svg', drawTitle:true, autoResize:false});
+    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {backend:'svg', drawTitle:true, autoResize:false, autoBeam:showBeams});
     await inst.load(tracksToMusicXML({beats:meterBeats, beatType:meterType}));
     inst.render();
     return {box, svgs:[...box.querySelectorAll('svg')]};
@@ -1326,6 +1801,17 @@ function setDynamics(show){
   if(wasScore) renderScore();
   autosave();
 }
+// Toggle beaming (joined eighth/shorter tails) on the engraved sheets. Re-renders
+// per-part sheets + the full score (if shown) with autoBeam on/off.
+function setBeams(show){
+  showBeams = show;
+  document.querySelectorAll('#beamToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.beam === 'show') === show));
+  const wasScore = sheetReady;
+  invalidateSheets();
+  render();
+  if(wasScore) renderScore();
+  autosave();
+}
 
 // Master switch: flip every part to solfa or sheet at once (sheet-incapable
 // parts fall back to solfa automatically in render()).
@@ -1374,19 +1860,22 @@ function syncSheetCursor(beat){
 const PITCH_LETTERS = ['C','D','E','F','G','A','B'];
 const ACCIDENTALS = [[0,'♮'],[1,'♯'],[2,'♯♯'],[-1,'♭'],[-2,'♭♭']];
 const EDIT_DURS = [['whole',4],['dotted half',3],['half',2],['dotted quarter',1.5],['quarter',1],['dotted eighth',0.75],['eighth',0.5],['16th',0.25]];
+const EDIT_DUR_VALS = EDIT_DURS.map(([,v])=> v).slice().sort((a,b)=> a-b);   // ascending, for the < > duration steppers
 const DUR_ABBR = {4:'w',3:'h.',2:'h',1.5:'q.',1:'q',0.75:'e.',0.5:'e',0.25:'s'};
 function durAbbr(d){ return DUR_ABBR[d] || (d+'b'); }
 
 let undoStack = [];
 // Capture key + transpose too, so undoing a transpose restores both the notes
 // (snapshot is taken before they are re-spelled) and the key/offset.
-function snapshot(){ return JSON.stringify({tracks, meterBeats, meterType, pieceName, transposeOffset, tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter}); }
+function snapshot(){ return JSON.stringify({tracks, meterBeats, meterType, pieceName, transposeOffset, homeOffset, pickupBeats, tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter}); }
 function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length > 80) undoStack.shift(); }
 function undo(){
   if(!undoStack.length) return;
   const s = JSON.parse(undoStack.pop());
   tracks = s.tracks; meterBeats = s.meterBeats; meterType = s.meterType; pieceName = s.pieceName;
   if(s.transposeOffset != null) transposeOffset = s.transposeOffset;
+  homeOffset = (s.homeOffset != null) ? s.homeOffset : transposeOffset;
+  pickupBeats = s.pickupBeats || 0;
   if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
   editSel = null; afterEdit(false); updateSheetBadges();
 }
@@ -1405,16 +1894,13 @@ function barBeats(){ return (meterBeats || 4) * (4 / (meterType || 4)); }
 // letter AND the audio) must agree, otherwise a too-long note sounds/labels as
 // the value you typed while the staff shows the shorter, bar-fitting one.
 function reflowTrack(t){
-  const bb = barBeats();
+  // Lay notes back-to-back from beat 0; keep each note's own duration. We do NOT clamp
+  // a note to its bar here: the serializer (partMeasuresXML) already splits anything that
+  // crosses a barline into tied notes. Clamping was destructive - changing one note's
+  // duration shifts later notes' bar positions and would silently shorten THEM.
   let cur = 0;
   (t.notes || []).forEach(n=>{
     n.startBeat = cur;
-    if(bb > 0){
-      let posInBar = cur % bb;
-      if(posInBar < 1e-6 || bb - posInBar < 1e-6) posInBar = 0;   // sitting on a barline -> whole bar free
-      const remaining = bb - posInBar;
-      if(n.durBeat > remaining + 1e-6) n.durBeat = remaining;     // never cross the barline
-    }
     cur += n.durBeat;
     recomputeNote(n);
   });
@@ -1428,10 +1914,18 @@ function defaultNote(prev){
 // any open inline editors + live previews), re-sync playback. autosave via contentChanged.
 function afterEdit(markEdited){
   if(markEdited !== false) edited = true;
-  tracks.forEach(reflowTrack);
+  tracks.forEach(t=>{ reflowTrack(t); clearStaleTies(t); });
   invalidateSheets();
   render();
   contentChanged();
+}
+// Drop a tie whose target no longer shares its pitch (e.g. the note was re-pitched,
+// turned to a rest, or deleted) so we never emit/sound an invalid tie.
+function clearStaleTies(t){
+  (t.notes||[]).forEach((n,i)=>{
+    const m = t.notes[i+1];
+    if(n.tieNext && (n.isRest || !m || m.isRest || m.midi !== n.midi)) delete n.tieNext;
+  });
 }
 
 function selectedTrack(){ return editSel ? tracks.find(t=> t.id === editSel.trackId) : null; }
@@ -1514,22 +2008,93 @@ function refreshPasteButtons(){
   document.querySelectorAll('.nePaste').forEach(b=>{ b.disabled = !has; b.title = has ? ('Paste ' + noteClip.length + ' note(s) after this one') : 'Nothing copied yet'; });
 }
 
+// ---- phrasing: slurs (arc over different pitches) + ties (sustain same pitch) ----
+// Slur the selected run: an arc from the first to the last selected note. Toggles
+// off if the run is already exactly that slur. Needs 2+ pitched notes.
+function toggleSlur(){
+  const t = selectedTrack(); if(!t) return;
+  const idxs = selectedIndices().filter(i=> t.notes[i] && !t.notes[i].isRest);
+  if(idxs.length < 2) return;
+  pushUndo();
+  const a = idxs[0], b = idxs[idxs.length-1];
+  const already = t.notes[a].slurStart && t.notes[b].slurStop;
+  idxs.forEach(i=>{ delete t.notes[i].slurStart; delete t.notes[i].slurStop; });
+  if(!already){ t.notes[a].slurStart = true; t.notes[b].slurStop = true; }
+  afterEdit();
+}
+// Tie adjacent SAME-PITCH notes within the selected run (a tie sustains one pitch).
+// Toggles off when every eligible pair is already tied. Needs 2+ notes.
+function toggleTie(){
+  const t = selectedTrack(); if(!t) return;
+  const idxs = selectedIndices().sort((a,b)=> a-b);
+  const pairs = [];
+  for(let k=0;k<idxs.length-1;k++){
+    const i = idxs[k], j = idxs[k+1], a = t.notes[i], b = t.notes[j];
+    if(j === i+1 && a && b && !a.isRest && !b.isRest && a.midi === b.midi) pairs.push(i);
+  }
+  if(!pairs.length) return;
+  pushUndo();
+  const already = pairs.every(i=> t.notes[i].tieNext);
+  pairs.forEach(i=>{ if(already) delete t.notes[i].tieNext; else t.notes[i].tieNext = true; });
+  afterEdit();
+}
+// Tie a single selected note to the very next note when they share a pitch (toggle).
+function toggleTieNext(){
+  const t = selectedTrack(); if(!t || !editSel) return;
+  const a = t.notes[editSel.index], b = t.notes[editSel.index+1];
+  if(!a || a.isRest || !b || b.isRest || a.midi !== b.midi) return;
+  pushUndo();
+  if(a.tieNext) delete a.tieNext; else a.tieNext = true;
+  afterEdit();
+}
+function canTieNext(){
+  const t = selectedTrack(); if(!t || !editSel) return false;
+  const a = t.notes[editSel.index], b = t.notes[editSel.index+1];
+  return !!(a && !a.isRest && b && !b.isRest && a.midi === b.midi);
+}
+// Which note indices in a track are under a slur / part of a tie (for grid markers).
+function phrasingMarks(t){
+  const slurred = new Set(), slurLinks = new Set(), tied = new Set(), tieStarts = new Set(); let inSlur = false;
+  (t.notes||[]).forEach((n,i)=>{
+    if(n.slurStart) inSlur = true;
+    if(inSlur || n.slurStop) slurred.add(i);
+    if(inSlur && !n.slurStop) slurLinks.add(i);   // slurLinks: draw an arc from this cell to the next within the run
+    if(n.slurStop) inSlur = false;
+    if(n.tieNext){ tied.add(i); tied.add(i+1); tieStarts.add(i); }   // tieStarts: draw the arc from this cell to the next
+  });
+  return {slurred, slurLinks, tied, tieStarts};
+}
+
 // Fill the per-note controls into `panel` (an inline box under the selected part).
 function renderNoteEditor(panel){
   const n = selectedNote();
   if(!panel || !n) return;
+  // lead-in (pickup): the beats from the start through this note. Offer the toggle only
+  // when that's less than a full bar (a pickup is a short first bar).
+  const _lt = selectedTrack();
+  const cumThrough = _lt ? _lt.notes.slice(0, editSel.index + 1).reduce((s,m)=> s + (m.durBeat||0), 0) : 0;
+  const showLeadIn = cumThrough > 1e-6 && cumThrough < barBeats() - 1e-6;
+  const leadInOn = Math.abs(pickupBeats - cumThrough) < 1e-6;
   const letterOpts = PITCH_LETTERS.map(l=> `<option ${!n.isRest && n.step === l ? 'selected' : ''}>${l}</option>`).join('');
   const accOpts = ACCIDENTALS.map(([v,s])=> `<option value="${v}" ${!n.isRest && (n.alter||0) === v ? 'selected' : ''}>${s}</option>`).join('');
   const durOpts = EDIT_DURS.map(([lab,v])=> `<option value="${v}" ${n.durBeat === v ? 'selected' : ''}>${lab}</option>`).join('');
   panel.innerHTML = `
     <div class="grp"><label>Pitch</label>
+      <button class="minibtn" id="neStepDn" ${n.isRest?'disabled':''} title="Down a step">−</button>
       <select id="neStep" ${n.isRest?'disabled':''}>${letterOpts}</select>
+      <button class="minibtn" id="neStepUp" ${n.isRest?'disabled':''} title="Up a step">+</button>
+      <button class="minibtn" id="neAccDn" ${n.isRest?'disabled':''} title="More flat">&lt;</button>
       <select id="neAcc" ${n.isRest?'disabled':''}>${accOpts}</select>
+      <button class="minibtn" id="neAccUp" ${n.isRest?'disabled':''} title="More sharp">&gt;</button>
       <button class="minibtn" id="neOctDn" ${n.isRest?'disabled':''}>oct −</button>
       <span class="nm" id="neOct">${n.isRest?'–':n.oct}</span>
       <button class="minibtn" id="neOctUp" ${n.isRest?'disabled':''}>oct +</button>
     </div>
-    <div class="grp"><label>Duration</label><select id="neDur">${durOpts}</select></div>
+    <div class="grp"><label>Duration</label>
+      <button class="minibtn" id="neDurDn" title="Shorter">&lt;</button>
+      <select id="neDur">${durOpts}</select>
+      <button class="minibtn" id="neDurUp" title="Longer">&gt;</button>
+    </div>
     <button class="minibtn" id="neRest">${n.isRest?'Make note':'Make rest'}</button>
     <div class="grp">
       <button class="minibtn" id="neInsBefore">Insert before</button>
@@ -1537,19 +2102,33 @@ function renderNoteEditor(panel){
       <button class="minibtn" id="neDelete">Delete</button>
       <button class="minibtn" id="neCopy">Copy</button>
       <button class="minibtn nePaste" id="nePaste">Paste</button>
+      <button class="minibtn" id="neTie" ${canTieNext()?'':'disabled'} title="Tie to the next note (same pitch)">${n.tieNext?'Untie →':'Tie →'}</button>
+      ${showLeadIn ? `<button class="minibtn${leadInOn?' on':''}" id="neLeadIn" title="Mark the notes up to here as a pickup / lead-in (a short first bar / anacrusis)">${leadInOn?'Lead-in ✓':'Lead-in'}</button>` : ''}
     </div>`;
   const t = selectedTrack(), i = editSel.index;
   panel.querySelector('#neStep').onchange = e=>{ pushUndo(); n.step = e.target.value; afterEdit(); };
   panel.querySelector('#neAcc').onchange = e=>{ pushUndo(); n.alter = parseInt(e.target.value); afterEdit(); };
+  // step the letter up/down (diatonic, wraps octave) and the accidental flat<->sharp,
+  // so you can click around instead of opening the dropdowns.
+  panel.querySelector('#neStepDn').onclick = ()=>{ pushUndo(); nudgePitch(n, -1); afterEdit(); };
+  panel.querySelector('#neStepUp').onclick = ()=>{ pushUndo(); nudgePitch(n, 1); afterEdit(); };
+  panel.querySelector('#neAccDn').onclick = ()=>{ pushUndo(); n.alter = Math.max(-2, (n.alter||0) - 1); afterEdit(); };
+  panel.querySelector('#neAccUp').onclick = ()=>{ pushUndo(); n.alter = Math.min(2, (n.alter||0) + 1); afterEdit(); };
   panel.querySelector('#neOctDn').onclick = ()=>{ pushUndo(); n.oct = Math.max(0, (n.oct||5) - 1); afterEdit(); };
   panel.querySelector('#neOctUp').onclick = ()=>{ pushUndo(); n.oct = Math.min(9, (n.oct||5) + 1); afterEdit(); };
   panel.querySelector('#neDur').onchange = e=>{ pushUndo(); n.durBeat = parseFloat(e.target.value); afterEdit(); };
+  // < > step to the next shorter / longer standard duration (alongside the dropdown)
+  panel.querySelector('#neDurDn').onclick = ()=>{ const prev = [...EDIT_DUR_VALS].reverse().find(v=> v < n.durBeat - 1e-9); if(prev != null){ pushUndo(); n.durBeat = prev; afterEdit(); } };
+  panel.querySelector('#neDurUp').onclick = ()=>{ const next = EDIT_DUR_VALS.find(v=> v > n.durBeat + 1e-9); if(next != null){ pushUndo(); n.durBeat = next; afterEdit(); } };
   panel.querySelector('#neRest').onclick = ()=>{ pushUndo(); if(n.isRest){ n.isRest = false; n.step = n.step||'C'; n.alter = n.alter||0; n.oct = n.oct||5; } else n.isRest = true; afterEdit(); };
   panel.querySelector('#neInsBefore').onclick = ()=>{ pushUndo(); t.notes.splice(i, 0, defaultNote(n)); afterEdit(); };
   panel.querySelector('#neInsAfter').onclick = ()=>{ pushUndo(); t.notes.splice(i+1, 0, defaultNote(n)); editSel = {trackId:t.id, index:i+1}; afterEdit(); };
   panel.querySelector('#neDelete').onclick = ()=>{ pushUndo(); t.notes.splice(i, 1); editSel = t.notes.length ? {trackId:t.id, index:Math.min(i, t.notes.length-1)} : null; afterEdit(); };
   panel.querySelector('#neCopy').onclick = copySelection;
   panel.querySelector('#nePaste').onclick = pasteAfterSelection;
+  panel.querySelector('#neTie').onclick = toggleTieNext;
+  const leadBtn = panel.querySelector('#neLeadIn');
+  if(leadBtn) leadBtn.onclick = ()=>{ pushUndo(); pickupBeats = leadInOn ? 0 : cumThrough; afterEdit(); };
   refreshPasteButtons();
 }
 
@@ -1566,6 +2145,10 @@ function renderBulkBar(panel, t, count){
     </div>
     <div class="grp"><label>Set</label><select id="blDur">${durOpts}</select></div>
     <button class="minibtn" id="blRest">Make rest</button>
+    <div class="grp"><label>Phrasing</label>
+      <button class="minibtn" id="blSlur" title="Slur the run (arc over the notes)">Slur</button>
+      <button class="minibtn" id="blTie" title="Tie adjacent same-pitch notes (sustain)">Tie</button>
+    </div>
     <div class="grp">
       <button class="minibtn" id="blCopy">Copy</button>
       <button class="minibtn nePaste" id="blPaste">Paste</button>
@@ -1577,6 +2160,8 @@ function renderBulkBar(panel, t, count){
   panel.querySelector('#blOctDn').onclick = ()=> bulkOct(-1);
   panel.querySelector('#blDur').onchange = e=>{ if(e.target.value) bulkDur(parseFloat(e.target.value)); };
   panel.querySelector('#blRest').onclick = ()=> bulkRest(true);
+  panel.querySelector('#blSlur').onclick = toggleSlur;
+  panel.querySelector('#blTie').onclick = toggleTie;
   panel.querySelector('#blCopy').onclick = copySelection;
   panel.querySelector('#blPaste').onclick = pasteAfterSelection;
   panel.querySelector('#blDelete').onclick = bulkDelete;
@@ -1602,7 +2187,7 @@ function duplicatePart(t){
   const copy = {
     id, label: (t.label || 'Voice') + ' copy',
     enabled: true, solo: false, vol: t.vol != null ? t.vol : 1,
-    view: t.view, editing: true,
+    view: t.view, editing: true, clef: t.clef || null,
     notes: (t.notes || []).map(n=> Object.assign({}, n)),
   };
   tracks.splice(tracks.indexOf(t) + 1, 0, copy);
@@ -1617,9 +2202,9 @@ function startPiece(partsSpec){
   if(hasMusic() && !confirm('Start a new piece? This clears the current one.')) return;
   exitReview();
   pushUndo();
-  pieceName = ''; lastXML = ''; transposeOffset = 0; edited = true;
+  pieceName = ''; lastXML = ''; transposeOffset = 0; homeOffset = 0; pickupBeats = 0; edited = true;
   meterBeats = 4; meterType = 4; setKey(0, 'C');   // sensible defaults: C major, 4/4
-  tracks = partsSpec.map((s,i)=> ({id:'t'+i, label:s.label, enabled:true, solo:false, vol:1, notes:[ s.note || defaultNote(null) ]}));
+  tracks = partsSpec.map((s,i)=> ({id:'t'+i, label:s.label, enabled:true, solo:false, vol:1, clef:s.clef || null, notes:[ s.note || defaultNote(null) ]}));
   soloActive = false; editSel = {trackId:'t0', index:0};
   tracks[0].editing = true;   // open the first part's inline editor so you can start typing notes
   afterEdit();
@@ -1630,10 +2215,10 @@ function startPiece(partsSpec){
 function newPiece(){ startPiece([{label:'Voice 1'}]); }
 // One-click SATB: four empty voices at sensible starting octaves.
 function newSATB(){ startPiece([
-  {label:'Soprano', note:{isRest:false, step:'C', alter:0, oct:5, durBeat:1}},
-  {label:'Alto',    note:{isRest:false, step:'A', alter:0, oct:4, durBeat:1}},
-  {label:'Tenor',   note:{isRest:false, step:'E', alter:0, oct:4, durBeat:1}},
-  {label:'Bass',    note:{isRest:false, step:'C', alter:0, oct:3, durBeat:1}},
+  {label:'Soprano', clef:'treble', note:{isRest:false, step:'C', alter:0, oct:5, durBeat:1}},
+  {label:'Alto',    clef:'treble', note:{isRest:false, step:'A', alter:0, oct:4, durBeat:1}},
+  {label:'Tenor',   clef:'treble', note:{isRest:false, step:'E', alter:0, oct:4, durBeat:1}},
+  {label:'Bass',    clef:'bass',   note:{isRest:false, step:'C', alter:0, oct:3, durBeat:1}},
 ]); }
 
 /* ---------- persistence ----------
@@ -1645,10 +2230,10 @@ let autosaveTimer = 0;
 
 function sessionState(){
   return {
-    v: 1, tracks, meterBeats, meterType, pieceName, transposeOffset,
+    v: 1, tracks, meterBeats, meterType, pieceName, transposeOffset, homeOffset, pickupBeats,
     tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter,
     bpm: parseInt(document.getElementById('bpm').value) || 84,
-    showDynamics,
+    showDynamics, showBeams,
   };
 }
 function autosave(){
@@ -1661,12 +2246,15 @@ function restoreState(s){
   tracks = s.tracks;
   meterBeats = s.meterBeats || 4; meterType = s.meterType || 4;
   pieceName = s.pieceName || ''; transposeOffset = s.transposeOffset || 0;
+  homeOffset = (s.homeOffset != null) ? s.homeOffset : transposeOffset;   // old saves: treat the saved key as home (readout 0)
+  pickupBeats = s.pickupBeats || 0;
   edited = true; lastXML = ''; editSel = null;
   tracks.forEach(t=>{ if(t.vol === undefined) t.vol = 1; if(t.enabled === undefined) t.enabled = true; });
   soloActive = tracks.some(t=> t.solo);   // re-activate solo if any voice was soloed (survives reload)
   if(s.tonicPc != null) setKey(s.tonicPc, s.tonicLetter);
   if(s.bpm) setTempo(s.bpm);
   if(s.showDynamics != null){ showDynamics = s.showDynamics; document.querySelectorAll('#dynToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.dyn === 'show') === showDynamics)); }
+  if(s.showBeams != null){ showBeams = s.showBeams; document.querySelectorAll('#beamToggle button').forEach(b=> b.classList.toggle('on', (b.dataset.beam === 'show') === showBeams)); }
   invalidateSheets(); render(); contentChanged();
   return true;
 }
@@ -1771,12 +2359,15 @@ function nudgePitch(n, steps){
 document.getElementById('allmp3').addEventListener('click', e=> exportAllMp3(e.currentTarget));
 document.getElementById('mixmp3').addEventListener('click', e=> exportMixMp3(e.currentTarget));
 document.getElementById('allpng').addEventListener('click', e=> exportAllPng(e.currentTarget));
+document.getElementById('allvid').addEventListener('click', e=> exportAllVideo(e.currentTarget));
+document.getElementById('mixvid').addEventListener('click', e=> exportMixVideo(e.currentTarget));
 document.getElementById('rendersheet').addEventListener('click', renderScore);
 document.getElementById('savexml').addEventListener('click', downloadMusicXML);
 document.getElementById('savepng').addEventListener('click', downloadScorePNG);
 document.getElementById('savepdf').addEventListener('click', downloadScorePDF);
 document.querySelectorAll('#masterview button').forEach(b=> b.addEventListener('click', ()=> setAllPartView(b.dataset.m)));
 document.querySelectorAll('#dynToggle button').forEach(b=> b.addEventListener('click', ()=> setDynamics(b.dataset.dyn === 'show')));
+document.querySelectorAll('#beamToggle button').forEach(b=> b.addEventListener('click', ()=> setBeams(b.dataset.beam === 'show')));
 document.getElementById('trup').addEventListener('click', ()=> transposeBy(1));
 document.getElementById('trdown').addEventListener('click', ()=> transposeBy(-1));
 document.querySelectorAll('#tabs .tab').forEach(b=> b.addEventListener('click', ()=> switchTab(b.dataset.view)));
@@ -1848,8 +2439,11 @@ document.addEventListener('keydown', e=>{
 keySel.addEventListener('change', ()=>{
   const selPc = parseInt(keySel.value);
   let d = ((selPc - currentTonic.pc) % 12 + 12) % 12; if(d > 6) d -= 12;   // nearest direction
-  if(d === 0){ syncTonicFromSel(); return; }
-  if(tracks.length){ transposeBy(d); } else { syncTonicFromSel(); render(); }
+  // Picking a key declares it "home": transpose the music into it, then zero the
+  // Transpose readout (homeOffset = current offset) so Transpose +/- counts from here.
+  if(d !== 0 && tracks.length){ transposeBy(d); } else { syncTonicFromSel(); }
+  homeOffset = transposeOffset;
+  render();
   autosave();
 });
 // The melody box rebuilds the piece only on Re-parse (or an example button), not

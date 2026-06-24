@@ -339,6 +339,34 @@ test('player edit: insert, delete, rest, duration, add/remove part, undo', async
   expect(await page.evaluate(() => tracks.length)).toBe(3);
 });
 
+test('note editor: +/- step buttons and < > accidental buttons drive the pitch (alongside the dropdowns)', async ({ page }) => {
+  await loadSATB(page);                                 // Soprano note 0 = C5
+  const sop = await editPart(page, 0);
+  await cells(sop).first().click();
+  // pitch +/- step the letter diatonically (and wrap the octave)
+  await sop.locator('.noteeditor #neStepUp').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].step)).toBe('D');
+  await sop.locator('.noteeditor #neStepDn').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].step)).toBe('C');
+  // accidental < > go flatter / sharper, clamped to +/-2
+  await sop.locator('.noteeditor #neAccUp').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].alter)).toBe(1);
+  await sop.locator('.noteeditor #neAccDn').click();
+  await sop.locator('.noteeditor #neAccDn').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].alter)).toBe(-1);
+  // duration < > step to the next shorter / longer standard value
+  const dur0 = await page.evaluate(() => tracks[0].notes[0].durBeat);   // quarter = 1
+  await sop.locator('.noteeditor #neDurUp').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(1.5);   // -> dotted quarter
+  await sop.locator('.noteeditor #neDurDn').click();
+  await sop.locator('.noteeditor #neDurDn').click();
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(0.75);  // 1.5 -> 1 -> 0.75
+  // the dropdowns are still there
+  await expect(sop.locator('.noteeditor #neStep')).toBeVisible();
+  await expect(sop.locator('.noteeditor #neAcc')).toBeVisible();
+  await expect(sop.locator('.noteeditor #neDur')).toBeVisible();
+});
+
 test('player edit: a part can be duplicated', async ({ page }) => {
   await loadSATB(page);
   const sop = await editPart(page, 0);
@@ -713,42 +741,49 @@ test('melody box rebuilds only on Re-parse, not on every keystroke', async ({ pa
   expect(await page.evaluate(() => tracks[0].notes.length)).toBe(3);
 });
 
-// ---- note duration is clamped to the bar (sound + solfa agree with the sheet) ----
+// ---- a note keeps its own duration; the sheet ties it across barlines (reflow never clamps) ----
 
-test('duration clamps to the bar: model, audio, label, and sheet all agree', async ({ page }) => {
+test('a note longer than its bar keeps its duration; the sheet ties it across the barline', async ({ page }) => {
   const r = await page.evaluate(() => {
     meterBeats = 4; meterType = 4; soloActive = false; edited = true;
     tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes: [
-      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 4 },   // bar 1: whole note
-      { isRest: false, step: 'D', alter: 0, oct: 5, durBeat: 1 },   // bar 2: quarter (3 beats left)
-      { isRest: false, step: 'E', alter: 0, oct: 5, durBeat: 4 },   // ask for a whole -> must clamp to 3
+      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 4 },   // whole
+      { isRest: false, step: 'D', alter: 0, oct: 5, durBeat: 1 },   // quarter
+      { isRest: false, step: 'E', alter: 0, oct: 5, durBeat: 4 },   // whole, starts at beat 5 -> crosses the barline
     ] }];
     tracks.forEach(reflowTrack);
     computeEndBeat();
     const doc = new DOMParser().parseFromString(tracksToMusicXML({ beats: 4, beatType: 4 }), 'application/xml');
     return {
       dur2: tracks[0].notes[2].durBeat,
-      label2: durAbbr(tracks[0].notes[2].durBeat),
+      start2: tracks[0].notes[2].startBeat,
       end: endBeat,
-      measures: doc.querySelectorAll('part measure').length,
+      tieStarts: doc.querySelectorAll('tie[type="start"]').length,
+      tieStops: doc.querySelectorAll('tie[type="stop"]').length,
     };
   });
-  expect(r.dur2).toBe(3);        // whole note clamped to the 3 remaining beats
-  expect(r.label2).toBe('h.');   // solfa label shows a dotted half, matching the staff
-  expect(r.end).toBe(8);         // audio ends at two full bars, no spillover beat
-  expect(r.measures).toBe(2);    // no third measure
+  expect(r.dur2).toBe(4);     // duration preserved, NOT clamped to the 3 remaining beats
+  expect(r.start2).toBe(5);   // laid back-to-back: 0 + 4 + 1
+  expect(r.end).toBe(9);      // audio plays the full 4 beats
+  expect(r.tieStarts).toBeGreaterThanOrEqual(1);   // the serializer ties it across the barline instead
+  expect(r.tieStops).toBeGreaterThanOrEqual(1);
 });
 
-test('duration clamp respects the meter: a whole note in 3/4 becomes a dotted half', async ({ page }) => {
-  const dur = await page.evaluate(() => {
-    meterBeats = 3; meterType = 4; soloActive = false; edited = true;
+test('reflow preserves a duration: editing one note never re-clamps a later one (paste bug)', async ({ page }) => {
+  const r = await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; soloActive = false; edited = true;
+    // mimic copy/paste then editing: note B was set to a half note, then note A's duration changes
     tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes: [
-      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 4 },
+      { isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 1 },   // A
+      { isRest: false, step: 'G', alter: 0, oct: 5, durBeat: 2 },   // B (pasted, then re-pitched + made a half)
+      { isRest: false, step: 'E', alter: 0, oct: 5, durBeat: 1 },
     ] }];
     tracks.forEach(reflowTrack);
-    return tracks[0].notes[0].durBeat;
+    tracks[0].notes[0].durBeat = 3;   // now change A -> shifts B to beat 3 (only 1 beat left in the bar)
+    tracks.forEach(reflowTrack);
+    return tracks[0].notes[1].durBeat;
   });
-  expect(dur).toBe(3);   // can't fit a 4-beat note in a 3-beat bar
+  expect(r).toBe(2);   // B keeps the half-note the user set, it is NOT shortened to fit the bar
 });
 
 // ---- in-tab note preview (audition) ----
@@ -1185,4 +1220,534 @@ test('player edit: copy from one part and paste into another keeps exact pitches
   await page.waitForTimeout(150);
   expect(await page.evaluate(() => tracks[1].notes.length)).toBe(a0 + 2);
   expect(await page.evaluate(() => tracks[1].notes.slice(1, 3).map((n) => n.name))).toEqual(['C5', 'D5']);
+});
+
+// ---- phrasing: slurs + ties ----
+
+// A single part: C5 C5 D5 E5 (two same-pitch notes up front, so ties are eligible).
+const REPEAT = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>V</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note></measure></part></score-partwise>`;
+
+test('player edit: slur a run emits slur start/stop and marks the grid', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).nth(0).click();
+  await cells(sop).nth(2).click({ modifiers: ['Shift'] });   // run 0..2
+  await sop.locator('.bulkbar #blSlur').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => ({ a: !!tracks[0].notes[0].slurStart, b: !!tracks[0].notes[2].slurStop }))).toEqual({ a: true, b: true });
+  const xml = await page.evaluate(() => tracksToMusicXML({ beats: meterBeats, beatType: meterType }));
+  expect(xml).toContain('<slur number="1" type="start"/>');
+  expect(xml).toContain('<slur number="1" type="stop"/>');
+  expect(await sop.locator('.note.slurred').count()).toBeGreaterThanOrEqual(3);
+  // toggling again removes it
+  await cells(sop).nth(0).click();
+  await cells(sop).nth(2).click({ modifiers: ['Shift'] });
+  await sop.locator('.bulkbar #blSlur').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => !!tracks[0].notes[0].slurStart)).toBe(false);
+});
+
+test('player edit: tie adjacent same-pitch notes emits tie/tied', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  const v = await editPart(page, 0);
+  await cells(v).nth(0).click();
+  await cells(v).nth(1).click({ modifiers: ['Shift'] });     // the two C5s
+  await v.locator('.bulkbar #blTie').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => !!tracks[0].notes[0].tieNext)).toBe(true);
+  const xml = await page.evaluate(() => tracksToMusicXML({ beats: meterBeats, beatType: meterType }));
+  expect(xml).toContain('<tie type="start"/>');
+  expect(xml).toContain('<tie type="stop"/>');
+  expect(xml).toContain('<tied type="start"/>');
+  expect(await v.locator('.note.tied').count()).toBeGreaterThanOrEqual(2);
+});
+
+test('player edit: single-note "Tie ->" ties to the next same-pitch note', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  const v = await editPart(page, 0);
+  await cells(v).nth(0).click();                              // single-select first C5
+  await expect(v.locator('.noteeditor #neTie')).toBeEnabled();
+  await v.locator('.noteeditor #neTie').click();
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => !!tracks[0].notes[0].tieNext)).toBe(true);
+  // a non-tieable note (different next pitch) disables the button
+  await cells(v).nth(2).click();                              // D5 followed by E5
+  await expect(v.locator('.noteeditor #neTie')).toBeDisabled();
+});
+
+// Four quavers (eighths) + a half rest, no <beam> in the source -> autoBeam should join them.
+const QUAVERS = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>V</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>eighth</type></note><note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>eighth</type></note><note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>eighth</type></note><note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>eighth</type></note><note><rest/><duration>4</duration><type>half</type></note></measure></part></score-partwise>`;
+
+test('engraved staff beams consecutive quavers (joined tails)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), QUAVERS);
+  const v = page.locator('.voice').first();
+  await v.getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .sheetnote').length >= 4, null, { timeout: 8000 });
+  expect(await page.locator('.voicebox .vf-beam').count()).toBeGreaterThan(0);   // VexFlow beams join the tails
+});
+
+test('slur/tie markers show on the player grid in play mode (not just while editing)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);  // C5 C5 D5 E5
+  const v = await editPart(page, 0);
+  await cells(v).nth(0).click();
+  await cells(v).nth(1).click({ modifiers: ['Shift'] });
+  await v.locator('.bulkbar #blTie').click();                 // tie the two C5s
+  await page.waitForTimeout(100);
+  await cells(v).nth(2).click();
+  await cells(v).nth(3).click({ modifiers: ['Shift'] });
+  await v.locator('.bulkbar #blSlur').click();                // slur D5..E5
+  await page.waitForTimeout(100);
+  await v.locator('.vedit').click();                          // leave edit mode
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => tracks[0].editing || false)).toBe(false);
+  expect(await v.locator('.note.tied').count()).toBeGreaterThanOrEqual(2);
+  expect(await v.locator('.note.slurred').count()).toBeGreaterThanOrEqual(2);
+});
+
+test('per-part PNG export works with slurs/ties present', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  await page.evaluate(() => { tracks[0].notes[0].tieNext = true; tracks[0].notes[2].slurStart = true; tracks[0].notes[3].slurStop = true; render(); });
+  const v = page.locator('.voice').first();
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    v.getByRole('button', { name: 'PNG' }).click(),
+  ]);
+  expect(dl.suggestedFilename()).toMatch(/\.png$/);
+  const fs = require('fs');
+  expect(fs.statSync(await dl.path()).size).toBeGreaterThan(1000);
+  expect(page.errors).toEqual([]);
+});
+
+test('playback: tied same-pitch notes merge into one sustained note', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);  // C5 C5 D5 E5
+  await page.evaluate(() => { tracks[0].notes[0].tieNext = true; });
+  const r = await page.evaluate(() => playableEvents(tracks[0], 0.5).map((e) => ({ name: e.name, dur: e.dur })));
+  expect(r.length).toBe(3);                       // the two C5s collapse to one event
+  expect(r[0].name).toBe('C5');
+  expect(r[0].dur).toBeCloseTo(2 * 0.5, 3);       // held for both quarters, full length
+});
+
+test('playback: slurred notes play legato (no detach gap)', async ({ page }) => {
+  await loadSATB(page);                            // Soprano C5 D5 E5 F5 quarters
+  await page.evaluate(() => { tracks[0].notes[0].slurStart = true; tracks[0].notes[2].slurStop = true; });
+  const r = await page.evaluate(() => playableEvents(tracks[0], 0.5).map((e) => e.dur));
+  expect(r[0]).toBeCloseTo(0.5, 3);               // slurred -> full length
+  expect(r[1]).toBeCloseTo(0.5, 3);
+  expect(r[2]).toBeCloseTo(0.5, 3);
+  expect(r[3]).toBeCloseTo(0.5 * 0.95, 3);        // outside the slur -> usual small gap
+});
+
+test('editing a tied note away from its pitch drops the stale tie', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  await page.evaluate(() => { tracks[0].notes[0].tieNext = true; });
+  const v = await editPart(page, 0);
+  await cells(v).nth(1).click();                   // the 2nd C5 (tie target)
+  await v.locator('.noteeditor #neStep').selectOption('G');   // re-pitch it
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => !!tracks[0].notes[0].tieNext)).toBe(false);   // tie cleared
+});
+
+test('slur draws a bridging arc on the grid (slurlink marker), showing the run as one gesture', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);  // C5 C5 D5 E5
+  await page.evaluate(() => { tracks[0].notes[0].slurStart = true; tracks[0].notes[2].slurStop = true; render(); });
+  const v = page.locator('.voice').first();
+  expect(await v.locator('.note.slurlink').count()).toBe(2);                  // arcs bridge 0->1 and 1->2
+  expect(await v.locator('.note.slurred').count()).toBeGreaterThanOrEqual(3); // whole run tinted
+  const bw = await v.locator('.note.slurlink').first().evaluate((el) => getComputedStyle(el, '::after').borderTopWidth);
+  expect(parseFloat(bw)).toBeGreaterThan(1);
+});
+
+test('phrasing: a slurred run is kept on one grid line (wrapped in a phrasegroup)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);  // C5 C5 D5 E5
+  await page.evaluate(() => { tracks[0].notes[0].slurStart = true; tracks[0].notes[2].slurStop = true; render(); });
+  const v = page.locator('.voice').first();
+  expect(await v.locator('.phrasegroup').count()).toBe(1);
+  expect(await v.locator('.phrasegroup > .note').count()).toBe(3);   // the whole slur run lives in one no-wrap group
+  // the group itself does not wrap
+  const wrap = await v.locator('.phrasegroup').first().evaluate((el) => getComputedStyle(el).flexWrap);
+  expect(wrap).toBe('nowrap');
+});
+
+test('phrasing: a tied pair is kept on one grid line (wrapped in a phrasegroup)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  await page.evaluate(() => { tracks[0].notes[0].tieNext = true; render(); });
+  const v = page.locator('.voice').first();
+  expect(await v.locator('.phrasegroup').count()).toBe(1);
+  expect(await v.locator('.phrasegroup > .note').count()).toBe(2);
+});
+
+test('tie draws a bridging arc on the grid (tiestart marker, not just an underline)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);  // C5 C5 D5 E5
+  await page.evaluate(() => { tracks[0].notes[0].tieNext = true; render(); });
+  const v = page.locator('.voice').first();
+  expect(await v.locator('.note.tiestart').count()).toBe(1);                 // the arc starts on the first C5
+  expect(await v.locator('.note.tied').count()).toBeGreaterThanOrEqual(2);   // both C5s are tinted
+  // the arc is drawn via a ::before pseudo with a visible bottom border
+  const bw = await v.locator('.note.tiestart').first().evaluate((el) => getComputedStyle(el, '::before').borderBottomWidth);
+  expect(parseFloat(bw)).toBeGreaterThan(1);
+});
+
+// ---- keyboard copy / paste of selected grid notes ----
+
+test('keyboard: Cmd/Ctrl+C then Cmd/Ctrl+V duplicates the selected grid notes', async ({ page }) => {
+  await loadSATB(page);                             // Soprano C5 D5 E5 F5
+  const sop = await editPart(page, 0);
+  const n0 = await page.evaluate(() => tracks[0].notes.length);   // 4
+  await cells(sop).nth(0).click();
+  await cells(sop).nth(1).click({ modifiers: ['Shift'] });        // select C5,D5
+  await page.keyboard.press('ControlOrMeta+c');
+  await page.keyboard.press('ControlOrMeta+v');
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(n0 + 2);
+  expect(await page.evaluate(() => tracks[0].notes.slice(2, 4).map((n) => n.name))).toEqual(['C5', 'D5']);
+});
+
+test('keyboard: Backspace deletes the selected grid notes', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).nth(1).click();
+  await cells(sop).nth(3).click({ modifiers: ['Shift'] });        // 1..3 (3 notes)
+  await page.keyboard.press('Backspace');
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(1);
+});
+
+// ---- per-part clef ----
+
+test('clef is captured on import (bass clef stays bass)', async ({ page }) => {
+  const bassPart = `<?xml version="1.0"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Bass</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>F</sign><line>4</line></clef></attributes><note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>A</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note><note><pitch><step>B</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type></note></measure></part></score-partwise>`;
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), bassPart);
+  expect(await page.evaluate(() => tracks[0].clef)).toBe('bass');
+  // even though the average pitch is high (would auto-guess treble), the written bass clef is kept after an edit
+  await page.evaluate(() => { tracks[0].notes.shift(); edited = true; });
+  const xml = await page.evaluate(() => tracksToMusicXML({}));
+  expect(xml).toContain('<clef><sign>F</sign><line>4</line></clef>');
+});
+
+test('player edit: setting a part clef changes the serialized clef', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await sop.locator('select.clefpick').selectOption('bass');
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => tracks[0].clef)).toBe('bass');
+  const xml = await page.evaluate(() => tracksToMusicXML({}));
+  expect(xml).toContain('<clef><sign>F</sign><line>4</line></clef>');
+  // back to auto -> derived from pitch (Soprano is high -> treble); no bass clef remains anywhere
+  await sop.locator('select.clefpick').selectOption('auto');
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => tracks[0].clef)).toBeFalsy();
+  expect(await page.evaluate(() => tracksToMusicXML({}))).not.toContain('<clef><sign>F</sign><line>4</line></clef>');
+});
+
+// ---- key sets home, transpose counts from it ----
+
+test('key sets home: picking a key zeroes Transpose; transpose then counts from that key', async ({ page }) => {
+  await loadSATB(page);                                   // C major
+  expect(await page.locator('#trval').textContent()).toBe('0');
+  await page.locator('#key').selectOption({ label: 'A major' });   // declare A as home
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => currentKeyName())).toBe('A major');
+  expect(await page.locator('#trval').textContent()).toBe('0');    // home reads 0, not -3 from C
+  await page.locator('#trdown').click();                  // transpose -1 from A
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => currentKeyName())).toBe('Ab major');   // A -> Ab
+  expect(await page.locator('#trval').textContent()).toBe('-1');
+});
+
+test('key sets home: re-picking the current key re-zeroes the Transpose readout', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#key').selectOption({ label: 'A major' });
+  await page.locator('#trdown').click();                  // Ab, -1
+  await page.waitForTimeout(100);
+  expect(await page.locator('#trval').textContent()).toBe('-1');
+  await page.locator('#key').selectOption({ label: 'Ab major' });   // declare current key as home
+  await page.waitForTimeout(100);
+  expect(await page.locator('#trval').textContent()).toBe('0');
+});
+
+test('key + transpose persist in the project (key, homeOffset, transposeOffset) and round-trip', async ({ page }) => {
+  await loadSATB(page);
+  await page.locator('#key').selectOption({ label: 'A major' });
+  await page.locator('#trdown').click();                  // Ab, displayed -1
+  await page.waitForTimeout(100);
+  const st = await page.evaluate(() => sessionState());
+  expect(st.tonicPc).toBe(8);                             // Ab is stored as the key
+  expect(st.homeOffset).toBe(-3);                         // A (home) is -3 from C
+  expect(st.transposeOffset).toBe(-4);                    // Ab is -4 from C
+  // restoring the saved project shows the same key + transpose readout
+  await page.evaluate(() => { tracks = []; render(); });
+  await page.evaluate((s) => restoreState(s), st);
+  expect(await page.evaluate(() => currentKeyName())).toBe('Ab major');
+  expect(await page.locator('#trval').textContent()).toBe('-1');
+});
+
+// ---- animated video export ----
+
+test('video (WebCodecs): the muxer loads and the offline encoder path is detected', async ({ page }) => {
+  expect(await page.evaluate(() => !!(window.Mp4Muxer && window.Mp4Muxer.Muxer))).toBe(true);   // CDN muxer present
+  // Chrome supports the WebCodecs offline path; just assert the detector runs and returns a boolean.
+  const wc = await page.evaluate(() => canWebCodecs(760, 206));
+  expect(typeof wc).toBe('boolean');
+});
+
+test('video (WebCodecs): offline export produces a valid MP4 (fast, no live capture)', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  const wc = await page.evaluate(() => canWebCodecs(760, 206));
+  test.skip(!wc, 'WebCodecs offline path not available in this browser');
+  await page.evaluate(() => {
+    window.__mp4 = null;
+    window.showSaveFilePicker = async (opts) => ({
+      createWritable: async () => ({ write: async (b) => { window.__mp4 = { name: opts.suggestedName, size: b.size, type: b.type }; }, close: async () => {} }),
+    });
+  });
+  await page.locator('.voice').first().locator('button.vvideo').click();
+  await page.waitForFunction(() => window.__mp4 !== null, null, { timeout: 30000 });
+  const f = await page.evaluate(() => window.__mp4);
+  expect(f.name).toMatch(/\.mp4$/);
+  expect(f.type).toBe('video/mp4');
+  expect(f.size).toBeGreaterThan(1000);
+  expect(page.errors).toEqual([]);
+});
+
+test('video: per-part Video, All parts as video, and Full mix (video) buttons exist', async ({ page }) => {
+  await loadSATB(page);
+  await expect(page.locator('.voice').first().locator('button.vvideo')).toBeVisible();
+  await expect(page.locator('#allvid')).toBeVisible();
+  await expect(page.locator('#mixvid')).toBeVisible();
+  expect(await page.locator('#allvid svg').count()).toBe(1);     // film icon injected
+  expect(await page.locator('#mixvid svg').count()).toBe(1);
+});
+
+test('video: All parts as video records a separate clip per part', async ({ page }) => {
+  test.slow();                                                    // each part records in real time
+  await loadSATB(page);                                           // Soprano + Alto -> 2 parts
+  await page.evaluate(() => { document.getElementById('bpm').value = 160; });   // keep clips short
+  const downloads = [];
+  page.on('download', (d) => downloads.push(d));
+  await page.locator('#allvid').click();
+  await expect.poll(() => downloads.length, { timeout: 40000 }).toBe(2);   // one file per part, not a single mix
+  for (const d of downloads) expect(d.suggestedFilename()).toMatch(/\.(mp4|webm)$/);
+  expect(page.errors).toEqual([]);
+});
+
+test('video: Full mix asks for a destination up front (Save As), not a silent download', async ({ page }) => {
+  test.slow();                                                    // records in real time
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  await page.evaluate(() => { document.getElementById('bpm').value = 160; });   // keep the clip short
+  await page.evaluate(() => {
+    window.__vid = null; window.__vidDownloaded = false;
+    const realCreate = document.createElement.bind(document);
+    document.createElement = (tag) => {                           // detect any fallback <a download> save
+      const el = realCreate(tag);
+      if (tag === 'a') { const c = el.click.bind(el); el.click = () => { if (el.download) window.__vidDownloaded = true; return c(); }; }
+      return el;
+    };
+    window.showSaveFilePicker = async (opts) => ({                // a fake picker that records what it was asked to save
+      createWritable: async () => ({ write: async (blob) => { window.__vid = { name: opts.suggestedName, size: blob.size }; }, close: async () => {} }),
+    });
+  });
+  await page.locator('#mixvid').click();
+  await page.waitForFunction(() => window.__vid !== null, null, { timeout: 30000 });
+  const v = await page.evaluate(() => window.__vid);
+  expect(v.name).toMatch(/\.(mp4|webm)$/);                        // suggested a real filename
+  expect(v.size).toBeGreaterThan(1000);                          // wrote the recorded clip through the chosen handle
+  expect(await page.evaluate(() => window.__vidDownloaded)).toBe(false);   // NOT a silent fallback download
+});
+
+// Real multi-part hymn projects (saved from the app) - good stress tests for the mix video.
+const HYMN_FIXTURES = ['through-the-love-of-god.solfege.json', 'o-perfect-love.solfege.json'];
+for (const fx of HYMN_FIXTURES) {
+  test(`video: mix frames animate the whole way through ${fx} (no freeze, no throw)`, async ({ page }) => {
+    const json = require('fs').readFileSync(path.resolve(__dirname, 'fixtures', fx), 'utf8');
+    const r = await page.evaluate((data) => {
+      restoreState(JSON.parse(data));
+      const audible = tracks.filter((t) => (soloActive ? t.solo : t.enabled));
+      const dims = videoDims(audible);
+      const cv = document.createElement('canvas'); cv.width = dims.W; cv.height = dims.H;
+      const g = cv.getContext('2d');
+      let maxBeat = 0;
+      audible.forEach((t) => t.notes.forEach((n) => { maxBeat = Math.max(maxBeat, n.startBeat + n.durBeat); }));
+      const snap = (beat) => { drawVideoFrame(g, audible, beat, dims); return g.getImageData(0, 0, dims.W, 60).data.join(','); };
+      let threw = null, frames = [];
+      try {
+        for (let beat = 0; beat <= maxBeat + 1; beat += 0.25) drawVideoFrame(g, audible, beat, dims);  // whole piece must not throw
+        frames = [snap(0), snap(maxBeat * 0.25), snap(maxBeat * 0.5), snap(maxBeat * 0.75)];
+      } catch (e) { threw = e.message; }
+      const distinct = new Set(frames).size;
+      return { parts: audible.length, maxBeat, threw, distinct };
+    }, json);
+    expect(r.threw).toBeNull();
+    expect(r.parts).toBeGreaterThan(1);          // both fixtures are full multi-part mixes (no track soloed)
+    expect(r.distinct).toBeGreaterThan(1);       // the strip actually scrolls (it isn't frozen on one frame)
+    expect(page.errors).toEqual([]);
+  });
+}
+
+test('video: a single-track video gets a scrolling sheet lane underneath the grid', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), QUAVERS);
+  const r = await page.evaluate(async () => {
+    const sheet = await prepareSheetStrip(tracks[0]);
+    if (!sheet) return { ok: false };
+    const dims = videoDims([tracks[0]], true);
+    const cv = document.createElement('canvas'); cv.width = dims.W; cv.height = dims.H;
+    const g = cv.getContext('2d');
+    drawVideoFrame(g, [tracks[0]], 1, dims, sheet);
+    const top = dims.titleH + dims.laneH;            // the sheet lane sits below the single grid lane
+    const data = g.getImageData(0, top, dims.W, dims.sheetH).data;
+    let nonPaper = 0;
+    for (let i = 0; i < data.length; i += 4) if (!(data[i] === 244 && data[i + 1] === 239 && data[i + 2] === 230)) nonPaper++;
+    // count accent2-green pixels in the staff area only (below the "Sheet" label) = the recoloured current note
+    const staffTop = top + 30;
+    const sd = g.getImageData(0, staffTop, dims.W, dims.sheetH - 30).data;
+    let green = 0;
+    for (let i = 0; i < sd.length; i += 4) if (sd[i] === 47 && sd[i + 1] === 107 && sd[i + 2] === 95) green++;
+    // a frame at a later beat should scroll the staff (different pixels)
+    const g2 = document.createElement('canvas'); g2.width = dims.W; g2.height = dims.H;
+    const c2 = g2.getContext('2d'); drawVideoFrame(c2, [tracks[0]], 0, dims, sheet);
+    const d0 = c2.getImageData(0, top, dims.W, dims.sheetH).data.join(',');
+    const d1 = data.join(',');
+    return { ok: true, sheetH: dims.sheetH, pts: sheet.pts.length, nonPaper, green, scrolls: d0 !== d1 };
+  });
+  expect(r.ok).toBe(true);
+  expect(r.sheetH).toBe(240);                // bigger sheet lane
+  expect(r.pts).toBeGreaterThan(0);
+  expect(r.nonPaper).toBeGreaterThan(500);   // the staff actually rendered into the lane
+  expect(r.green).toBeGreaterThan(0);        // the current note is turned green
+  expect(r.scrolls).toBe(true);              // and it moves with the beat
+});
+
+test('video: the full mix gets NO sheet lane (kept compact)', async ({ page }) => {
+  await loadSATB(page);   // 2 parts
+  const sheetH = await page.evaluate(() => videoDims(tracks, false).sheetH);
+  expect(sheetH).toBe(0);
+});
+
+test('video: a frame renders the active note highlighted (canvas paints, no error)', async ({ page }) => {
+  await loadSATB(page);
+  const ok = await page.evaluate(() => {
+    const parts = [tracks[0]];
+    const dims = videoDims(parts);
+    const cv = document.createElement('canvas'); cv.width = dims.W; cv.height = dims.H;
+    const g = cv.getContext('2d');
+    drawVideoFrame(g, parts, 0, dims);                            // beat 0 -> first note active
+    const data = g.getImageData(0, 0, dims.W, dims.H).data;
+    let nonPaper = 0;
+    for (let i = 0; i < data.length; i += 4) if (!(data[i] === 244 && data[i + 1] === 239 && data[i + 2] === 230)) nonPaper++;
+    return { w: dims.W, even: dims.H % 2 === 0, nonPaper };
+  });
+  expect(ok.w).toBe(760);
+  expect(ok.even).toBe(true);                                     // H.264 needs even dimensions
+  expect(ok.nonPaper).toBeGreaterThan(1000);                      // it actually drew the grid
+});
+
+test('video: pickVideoMime returns a recordable type', async ({ page }) => {
+  const m = await page.evaluate(() => pickVideoMime());
+  expect(['.mp4', '.webm']).toContain(m.ext);                     // prefers mp4, falls back to webm
+});
+
+test('video: exporting a part records a shareable clip with audio', async ({ page }) => {
+  test.slow();                                                    // recording runs in real time
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), REPEAT);
+  await page.evaluate(() => { document.getElementById('bpm').value = 160; });   // keep the clip short
+  const row = page.locator('.voice').first();
+  const [dl] = await Promise.all([
+    page.waitForEvent('download', { timeout: 30000 }),
+    row.locator('button.vvideo').click(),
+  ]);
+  expect(dl.suggestedFilename()).toMatch(/\.(mp4|webm)$/);
+  const fs = require('fs');
+  expect(fs.statSync(await dl.path()).size).toBeGreaterThan(1000);
+  expect(page.errors).toEqual([]);
+});
+
+// ---- beaming toggle ----
+
+test('beams: the Join/Split toggle turns eighth-note beams on and off', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), QUAVERS);
+  const v = page.locator('.voice').first();
+  await v.getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .vf-beam').length > 0, null, { timeout: 8000 });
+  await page.locator('#beamToggle button', { hasText: 'Split' }).click();   // turn beaming off
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .sheetnote').length >= 4 && document.querySelectorAll('.voicebox .vf-beam').length === 0, null, { timeout: 8000 });
+  expect(await page.evaluate(() => showBeams)).toBe(false);
+  await page.locator('#beamToggle button', { hasText: 'Join' }).click();    // back on
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .vf-beam').length > 0, null, { timeout: 8000 });
+});
+
+// ---- per-part sheet (staff) export ----
+
+test('export: a part in Sheet view exports its engraved staff as PNG', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, document.getElementById('xmlmsg')), QUAVERS);
+  const v = page.locator('.voice').first();
+  await v.getByRole('button', { name: 'Sheet', exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.voicebox .sheetnote').length >= 4, null, { timeout: 8000 });
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    v.getByRole('button', { name: 'PNG' }).click(),
+  ]);
+  expect(dl.suggestedFilename()).toMatch(/\.png$/);
+  const fs = require('fs');
+  expect(fs.statSync(await dl.path()).size).toBeGreaterThan(1000);
+  expect(page.errors).toEqual([]);
+});
+
+// ---- anacrusis / pickup (lead-in) + bar feedback ----
+
+test('pickup: the serializer emits a short implicit first measure', async ({ page }) => {
+  const r = await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; edited = true; pickupBeats = 1;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes:
+      [0,0,0,0,0].map(() => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 1 })) }];   // pickup + 4-beat bar
+    tracks.forEach(reflowTrack);
+    const doc = new DOMParser().parseFromString(tracksToMusicXML({ beats: 4, beatType: 4, pickupBeats: 1 }), 'application/xml');
+    const ms = [...doc.querySelectorAll('part measure')];
+    return {
+      count: ms.length,
+      implicit: ms[0].getAttribute('implicit'),
+      firstDur: [...ms[0].querySelectorAll('note duration')].reduce((s, d) => s + (+d.textContent), 0),
+    };
+  });
+  expect(r.count).toBe(2);          // pickup measure + one full bar
+  expect(r.implicit).toBe('yes');   // pickup bar isn't a counted full measure
+  expect(r.firstDur).toBe(768);     // the pickup bar holds just the 1-beat lead-in (XDIV ticks)
+});
+
+test('bar feedback: a barline shows at each bar boundary in the grid', async ({ page }) => {
+  await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; edited = true; pickupBeats = 0;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes:
+      Array.from({ length: 8 }, () => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 1 })) }];   // two full 4/4 bars
+    afterEdit();
+  });
+  expect(await page.locator('.voice').first().locator('.barline').count()).toBe(1);   // one internal barline (the final one is omitted)
+});
+
+test('bar feedback: an incomplete last bar is flagged, and marking the lead-in clears it', async ({ page }) => {
+  await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; edited = true; pickupBeats = 0;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes:
+      Array.from({ length: 5 }, () => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 1 })) }];   // 5 beats -> not whole bars
+    afterEdit();
+  });
+  const v = page.locator('.voice').first();
+  await expect(v.locator('.barwarn')).toBeVisible();              // "last bar 1/4"
+  const sop = await editPart(page, 0);
+  await cells(sop).nth(0).click();                               // select the would-be lead-in note
+  await expect(sop.locator('.noteeditor #neLeadIn')).toBeVisible();
+  await sop.locator('.noteeditor #neLeadIn').click();            // mark it as the pickup
+  expect(await page.evaluate(() => pickupBeats)).toBe(1);
+  await expect(v.locator('.barwarn')).toHaveCount(0);            // now 1 + 4 = whole bars, warning gone
+});
+
+test('pickup persists in the project and round-trips', async ({ page }) => {
+  await page.evaluate(() => {
+    meterBeats = 4; meterType = 4; edited = true; pickupBeats = 1;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1, notes:
+      [0,0,0,0,0].map(() => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: 1 })) }];
+    afterEdit();
+  });
+  const st = await page.evaluate(() => sessionState());
+  expect(st.pickupBeats).toBe(1);
+  await page.evaluate((s) => { pickupBeats = 0; restoreState(s); }, st);
+  expect(await page.evaluate(() => pickupBeats)).toBe(1);
 });
