@@ -28,6 +28,10 @@ samples/choir/*.ogg
 
 # ---- Local OMR test inputs (hymn PDFs / personal photos), not for the repo ----
 tests/fixtures/
+test-oworship.jpeg
+
+# ---- Local dev scratch (kept out of the public repo) ----
+prompt.txt
 
 # ---- OS / editor cruft ----
 .DS_Store
