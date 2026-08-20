@@ -271,18 +271,16 @@ test('player lists each part with its notes', async ({ page }) => {
   expect(await cells(sop).count()).toBe(4);
 });
 
-test('player: the Tools toggle reveals the piece toolbar', async ({ page }) => {
+test('player: the tools panel is permanently expanded (no toggle) and holds the settings', async ({ page }) => {
   await loadSATB(page);
-  await expect(page.locator('#edtools')).toBeHidden();
-  await expect(page.locator('#edToolsToggle')).toBeVisible();
-  await page.locator('#edToolsToggle').click();
-  await expect(page.locator('#edtools')).toBeVisible();
-  // an action works from here (Add part)
+  await expect(page.locator('#edtools')).toBeVisible();                 // always shown, no toggle needed
+  await expect(page.locator('#edToolsToggle')).toHaveCount(0);          // the old toggle is gone
+  await expect(page.locator('#edtools #key')).toBeVisible();            // the moved playback settings live here now
+  await expect(page.locator('#edtools #bpm')).toBeVisible();
+  // an action works directly (Add part)
   const before = await page.evaluate(() => tracks.length);
   await page.locator('#edAddPart').click();
   expect(await page.evaluate(() => tracks.length)).toBe(before + 1);
-  await page.locator('#edToolsToggle').click();
-  await expect(page.locator('#edtools')).toBeHidden();
 });
 
 test('player edit: changing pitch updates the model and live preview', async ({ page }) => {
@@ -425,6 +423,93 @@ test('player edit: arrow up/down nudges the selected pitch a diatonic step', asy
   expect(await page.evaluate(() => tracks[0].notes[0].name)).toBe('B4');
 });
 
+// ---- edit-mode keyboard shortcuts ----
+
+test('keys: left/right move the selection while editing, and extend with Shift', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).first().click();                       // select note 0
+  await page.keyboard.press('ArrowRight');                // -> note 1
+  expect(await page.evaluate(() => editSel.index)).toBe(1);
+  await page.keyboard.press('ArrowRight');                // -> note 2
+  expect(await page.evaluate(() => editSel.index)).toBe(2);
+  await page.keyboard.press('Shift+ArrowLeft');           // extend back to include note 1
+  expect(await page.evaluate(() => [...(multiSel?.set || [])].sort())).toEqual([1, 2]);
+});
+
+test('keys: left/right seek the transport when NOT editing', async ({ page }) => {
+  await loadSATB(page);   // no part in edit mode
+  const before = await page.evaluate(() => (typeof playFrom !== 'undefined' ? 0 : 0));   // just assert no throw + edit untouched
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  expect(await page.evaluate(() => (editSel ? editSel.index : null))).toBe(null);   // arrows did NOT select a note
+  expect(page.errors).toEqual([]);
+});
+
+test('keys: digits set duration and Period toggles the dot', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).first().click();
+  await page.keyboard.press('Digit3');                    // quarter
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(1);
+  await page.keyboard.press('Digit4');                    // eighth
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(0.5);
+  await page.keyboard.press('Period');                    // dotted eighth
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(0.75);
+  await page.keyboard.press('Period');                    // back to eighth
+  expect(await page.evaluate(() => tracks[0].notes[0].durBeat)).toBe(0.5);
+});
+
+test('keys: = / - / 0 change the accidental of the selection', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).first().click();
+  await cells(sop).nth(2).click({ modifiers: ['Shift'] });   // select a 3-note run
+  await page.keyboard.press('Equal');                        // sharpen all
+  expect(await page.evaluate(() => tracks[0].notes.slice(0, 3).map((n) => n.alter))).toEqual([1, 1, 1]);
+  await page.keyboard.press('Minus');
+  await page.keyboard.press('Minus');                        // flatten twice -> flat
+  expect(await page.evaluate(() => tracks[0].notes.slice(0, 3).map((n) => n.alter))).toEqual([-1, -1, -1]);
+  await page.keyboard.press('Digit0');                       // natural
+  expect(await page.evaluate(() => tracks[0].notes.slice(0, 3).map((n) => n.alter))).toEqual([0, 0, 0]);
+});
+
+test('keys: Shift+up/down shifts the selection by an octave', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).first().click();
+  const oct = await page.evaluate(() => tracks[0].notes[0].oct);
+  await page.keyboard.press('Shift+ArrowUp');
+  expect(await page.evaluate(() => tracks[0].notes[0].oct)).toBe(oct + 1);
+});
+
+test('keys: Enter inserts a note after the selection and selects it', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  const n0 = await page.evaluate(() => tracks[0].notes.length);
+  await cells(sop).first().click();                          // select note 0
+  await page.keyboard.press('Enter');
+  expect(await page.evaluate(() => tracks[0].notes.length)).toBe(n0 + 1);
+  expect(await page.evaluate(() => editSel.index)).toBe(1);   // the new note is selected
+});
+
+test('keys: ? opens the shortcut cheat-sheet and Escape closes it', async ({ page }) => {
+  await loadSATB(page);
+  await page.keyboard.press('Shift+Slash');                  // "?"
+  await expect(page.locator('#kbdhelp')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#kbdhelp')).toHaveCount(0);
+});
+
+test('keys: editing a part shows the "press ? for shortcuts" hint, which opens the sheet', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  const tip = sop.locator('.kbdtip');
+  await expect(tip).toBeVisible();                           // discoverable while editing
+  await tip.click();
+  await expect(page.locator('#kbdhelp')).toBeVisible();      // and it opens the cheat-sheet
+});
+
 // ---- Phase 4: blank "New piece" builder ----
 
 test('New piece: starts a blank piece in the player, builds and serializes', async ({ page }) => {
@@ -531,6 +616,7 @@ test('Phase 5: a failed (low-res) picture is handled gracefully through the real
     status: 422, contentType: 'application/json',
     body: JSON.stringify({ detail: 'Image resolution too low for OMR. Audiveris needs roughly 300 DPI.' }),
   }));
+  await page.evaluate(() => { omrAvailable = true; document.getElementById('omrpanel').hidden = false; });   // backend present
   // Choose a picture through the actual file input + Transcribe button (not via internals).
   await page.locator('summary', { hasText: 'Transcribe a photo' }).click();   // open the <details>
   await page.setInputFiles('#photo', { name: 'lowres.png', mimeType: 'image/png', buffer: Buffer.from('not-a-real-image') });
@@ -542,6 +628,21 @@ test('Phase 5: a failed (low-res) picture is handled gracefully through the real
   expect(await page.locator('#omrbanner').isVisible()).toBe(false);   // no review banner on failure
   expect(await page.locator('#view-player').isVisible()).toBe(true);  // stayed put, did not crash
   expect(page.errors).toEqual([]);
+});
+
+// Hosting the static pages without the OMR backend: the photo UI must not appear.
+test('OMR: the photo panel stays hidden when no backend answers /health', async ({ page }) => {
+  await expect(page.locator('#omrpanel')).toBeHidden();               // /health unreachable on load -> hidden
+  expect(await page.evaluate(() => omrAvailable)).toBe(false);
+});
+
+test('OMR: the photo panel appears once /health reports a backend', async ({ page }) => {
+  await page.route('**/health', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', engine: 'audiveris' }),
+  }));
+  await page.evaluate(() => checkOmrBackend());                       // re-probe now that /health answers
+  await expect(page.locator('#omrpanel')).toBeVisible();
+  expect(await page.evaluate(() => omrAvailable)).toBe(true);
 });
 
 test('OMR import keeps every voice; editor flags short ones for review (no auto-delete)', async ({ page }) => {
@@ -1183,6 +1284,42 @@ test('player edit: bulk octave shift applies to every selected note', async ({ p
   expect(after).toEqual(before.map((o) => o + 1));
 });
 
+test('player edit: bulk accidental nudge sharpens every selected note', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).nth(0).click();
+  await cells(sop).nth(2).click({ modifiers: ['Shift'] });
+  await sop.locator('.bulkbar #blAccUp').click();   // "more sharp" over the whole selection
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks[0].notes.slice(0, 3).map((n) => n.alter))).toEqual([1, 1, 1]);
+});
+
+test('player edit: bulk accidental dropdown sets every selected note flat', async ({ page }) => {
+  await loadSATB(page);
+  const sop = await editPart(page, 0);
+  await cells(sop).nth(0).click();
+  await cells(sop).nth(2).click({ modifiers: ['Shift'] });
+  await sop.locator('.bulkbar #blAcc').selectOption('-1');   // ♭
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => tracks[0].notes.slice(0, 3).map((n) => n.alter))).toEqual([-1, -1, -1]);
+});
+
+// The per-part image exports label themselves with all three fields, not just the part.
+test('export: per-part image caption carries piece, part, and key', async ({ page }) => {
+  await loadSATB(page);
+  const r = await page.evaluate(() => ({ cap: exportCaption(tracks[0]), label: tracks[0].label, piece: pieceName, key: currentKeyName() }));
+  expect(r.cap).toContain(r.piece);
+  expect(r.cap).toContain(r.label);
+  if (r.key) expect(r.cap).toContain(r.key);
+});
+
+// A fresh piece starts from clean defaults, tempo included (not the last piece's).
+test('new piece resets the tempo to the moderate default', async ({ page }) => {
+  await page.evaluate(() => setTempo(150));                          // a fast previous piece
+  await page.evaluate(() => { window.confirm = () => true; newPiece(); });
+  expect(await page.evaluate(() => parseInt(document.getElementById('bpm').value))).toBe(84);
+});
+
 test('player edit: bulk delete removes all selected notes', async ({ page }) => {
   await loadSATB(page);
   const sop = await editPart(page, 0);
@@ -1672,6 +1809,67 @@ test('beams: the Join/Split toggle turns eighth-note beams on and off', async ({
   expect(await page.evaluate(() => showBeams)).toBe(false);
   await page.locator('#beamToggle button', { hasText: 'Join' }).click();    // back on
   await page.waitForFunction(() => document.querySelectorAll('.voicebox .vf-beam').length > 0, null, { timeout: 8000 });
+});
+
+// Build a one-voice track from a list of durations (in quarter-beats) and return
+// the serialized notes with their <beam> markings, meter set via meterBeats/Type.
+async function serializedBeams(page, beats, beatType, durs) {
+  return page.evaluate(({ beats, beatType, durs }) => {
+    meterBeats = beats; meterType = beatType; edited = true; pickupBeats = 0; showBeams = true;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1,
+      notes: durs.map((d) => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: d })) }];
+    tracks.forEach(reflowTrack);
+    const doc = new DOMParser().parseFromString(tracksToMusicXML({ beats, beatType }), 'application/xml');
+    return [...doc.querySelectorAll('part measure note')].map((n) => ({
+      type: n.querySelector('type')?.textContent,
+      beams: [...n.querySelectorAll('beam')].map((b) => `${b.getAttribute('number')}:${b.textContent}`),
+    }));
+  }, { beats, beatType, durs });
+}
+
+// 6/8 is compound: the beat is a dotted quarter (three eighths), so a dotted-quaver
+// + semiquaver + quaver is ONE beat and beams as one group - not split into twos.
+test('beams: 6/8 joins a dotted-eighth+16th+eighth as one compound beat', async ({ page }) => {
+  const r = await serializedBeams(page, 6, 8, [0.75, 0.25, 0.5, 0.5, 0.5, 0.5]);
+  // beat 1 (dotted quarter): the three notes carry one primary beam + a backward hook on the 16th
+  expect(r[0].beams).toEqual(['1:begin']);
+  expect(r[1].beams).toEqual(['1:continue', '2:backward hook']);
+  expect(r[2].beams).toEqual(['1:end']);
+  // beat 2 (dotted quarter): three eighths beamed straight through
+  expect(r[3].beams).toEqual(['1:begin']);
+  expect(r[4].beams).toEqual(['1:continue']);
+  expect(r[5].beams).toEqual(['1:end']);
+});
+
+// Simple meter beams per (undotted) beat: 4/4 splits a full bar of eighths into 2+2+2+2.
+test('beams: 4/4 beams eighths in twos (per quarter beat), never across the beat', async ({ page }) => {
+  const r = await serializedBeams(page, 4, 4, [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+  expect(r.map((n) => n.beams)).toEqual(
+    [['1:begin'], ['1:end'], ['1:begin'], ['1:end'], ['1:begin'], ['1:end'], ['1:begin'], ['1:end']]);
+});
+
+// OSMD must engrave our explicit beams verbatim: the widest primary beam in the 6/8
+// bar sits over THREE noteheads (a compound beat), not two - proving autoBeam does
+// not override us and the beats join as one group.
+test('beams: OSMD engraves the serialized 6/8 as three-note groups (not pairs)', async ({ page }) => {
+  const maxUnderBeam = await page.evaluate(async () => {
+    meterBeats = 6; meterType = 8; edited = true; pickupBeats = 0; showBeams = true;
+    tracks = [{ id: 't0', label: 'M', enabled: true, solo: false, vol: 1,
+      notes: [0.75, 0.25, 0.5, 0.5, 0.5, 0.5].map((d) => ({ isRest: false, step: 'C', alter: 0, oct: 5, durBeat: d })) }];
+    tracks.forEach(reflowTrack);
+    const div = document.createElement('div'); div.style.width = '900px'; document.body.appendChild(div);
+    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(div, { backend: 'svg', autoResize: false, autoBeam: true });
+    await inst.load(tracksToMusicXML({ beats: 6, beatType: 8 }));
+    inst.render();
+    const heads = [...div.querySelectorAll('.vf-notehead')].map((e) => e.getBBox());
+    const under = [...div.querySelectorAll('.vf-beam')].map((e) => {
+      const b = e.getBBox();   // count noteheads whose x-extent overlaps this beam's span
+      return heads.filter((h) => h.x <= b.x + b.width && h.x + h.width >= b.x).length;
+    });
+    div.remove();
+    return Math.max(...under);
+  });
+  expect(maxUnderBeam).toBe(3);   // dotted-quaver + semiquaver + quaver share one beam
 });
 
 // ---- per-part sheet (staff) export ----

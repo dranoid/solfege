@@ -152,9 +152,10 @@
   .savescore .vm-label{margin-right:2px}
   /* editor */
   .editbar{display:flex;align-items:flex-end;gap:14px 18px;flex-wrap:wrap;margin-bottom:18px}
-  /* shared piece-tools toolbar: its own card now it lives between the tabs and the views */
-  #edtools{background:var(--paper2);border:1px solid var(--line2);border-radius:10px;padding:14px 18px;margin-bottom:14px}
-  #edtools[hidden]{display:none}   /* needed: .editbar's display:flex would otherwise beat the hidden attribute */
+  /* combined settings + piece-tools panel (.panel), always shown between the tabs and
+     the views. A rule divides the playback settings from the piece-editing tools. */
+  .toolspanel .ctrls{margin-bottom:2px}
+  .toolspanel .editbar{border-top:1px solid var(--line);padding-top:16px;margin-top:12px;margin-bottom:0}
   #edTitle{width:200px}
   .omrbanner{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:rgba(140,47,42,0.07);border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:8px;padding:11px 14px;margin-bottom:16px}
   .omrbanner[hidden]{display:none}
@@ -209,3 +210,16 @@
   .editpreview{margin-top:4px}
   .draglabel{position:fixed;z-index:80;background:var(--accent2);color:var(--paper);font-family:"JetBrains Mono",monospace;font-size:12px;padding:3px 8px;border-radius:5px;pointer-events:none;transform:translate(12px,-28px)}
   .draglabel[hidden]{display:none}
+  /* subtle "press ? for shortcuts" nudge under a part being edited */
+  .kbdtip{display:inline-flex;align-items:center;gap:6px;margin-top:8px;background:transparent;border:none;cursor:pointer;font-family:"Newsreader",serif;font-style:italic;font-size:13px;color:var(--muted-text);padding:2px 0}
+  .kbdtip:hover{color:var(--accent)}
+  .kbdtip kbd{font-family:"JetBrains Mono",monospace;font-style:normal;font-size:11px;background:var(--paper2);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;color:var(--ink)}
+  /* keyboard-shortcut cheat-sheet overlay (opened with ?) */
+  #kbdhelp{position:fixed;inset:0;z-index:120;background:rgba(33,28,22,0.45);display:flex;align-items:center;justify-content:center;padding:20px}
+  #kbdhelp .kbdcard{background:var(--paper);border:1px solid var(--line2);border-radius:12px;padding:22px 26px;max-width:520px;width:100%;box-shadow:0 18px 50px rgba(33,28,22,0.3)}
+  #kbdhelp h3{font-family:"Fraunces",serif;font-size:18px;margin:0 0 14px;color:var(--ink)}
+  #kbdhelp table{width:100%;border-collapse:collapse}
+  #kbdhelp td{padding:5px 8px;font-size:14px;color:var(--ink);vertical-align:top;border-top:1px solid var(--line)}
+  #kbdhelp td:first-child{white-space:nowrap;width:150px}
+  #kbdhelp kbd{font-family:"JetBrains Mono",monospace;font-size:12px;background:var(--paper2);border:1px solid var(--line2);border-radius:5px;padding:2px 7px;color:var(--ink)}
+  #kbdhelp .hint{margin-top:14px}

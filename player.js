@@ -91,6 +91,7 @@ function displayTranspose(){ return transposeOffset - homeOffset; }   // the use
 let edited = false;        // true once the notes have been edited/built (sheets then come from the serializer, not lastXML)
 let editSel = null;        // {trackId, index} primary/anchor note selected in the editor
 let multiSel = null;       // {trackId, set:Set<index>} when 2+ notes are selected in one part (bulk edit)
+let selAnchor = null;      // note index the keyboard range-select (Shift+←/→) grows from
 let noteClip = null;       // deep-copied notes on the clipboard (copy/paste within & across parts)
 let meterBeats = 4, meterType = 4;   // piece meter (parsed from imports; editable in the editor)
 let pickupBeats = 0;   // anacrusis/lead-in: quarter-note beats in the short first (pickup) bar, 0 = none
@@ -205,6 +206,9 @@ function parseParts(doc){
   return labelTracks([...map.values()].filter(t=>t.cnt > 0));
 }
 
+// Andante/Moderato - a comfortable "walking pace" that suits most hymns, neither
+// rushed nor dragging. Used as the fresh-piece tempo and the missing-value fallback.
+const DEFAULT_BPM = 84;
 function setTempo(bpm){
   bpm = Math.max(40, Math.min(160, Math.round(bpm)));
   const s = document.getElementById('bpm'); s.value = bpm;
@@ -297,6 +301,19 @@ async function loadFile(file, msgEl){
 
 /* ---------- photo OMR (local backend) ---------- */
 const API = (location.protocol === 'file:') ? 'http://localhost:8000' : '';
+// Photo OMR is the one feature that needs the backend. When hosting the static
+// pages without it, /health won't answer, so we hide the "Transcribe a photo" UI
+// (and disable the ⌘V-paste shortcut) rather than offer a feature that can't work.
+let omrAvailable = false;
+async function checkOmrBackend(){
+  try{
+    const r = await fetch(API + '/health', {method:'GET'});
+    const j = r.ok ? await r.json() : null;        // must be OUR backend, not a static host's 200 fallback
+    omrAvailable = !!(j && j.status === 'ok' && j.engine);
+  }catch(_){ omrAvailable = false; }               // no backend / blocked / offline
+  const panel = document.getElementById('omrpanel');
+  if(panel) panel.hidden = !omrAvailable;
+}
 async function transcribePhoto(file, msgEl){
   pieceName = file.name.replace(/\.[^.]+$/, '');
   msgEl.textContent = 'Transcribing ' + file.name + '… (first run downloads OMR models, give it a minute)';
@@ -495,6 +512,12 @@ function render(){
         renderNoteEditor(ne);
         row.append(ne);
       }
+      // A quiet, always-present nudge toward the keyboard shortcuts while editing.
+      const tip = document.createElement('button'); tip.type = 'button'; tip.className = 'kbdtip';
+      tip.innerHTML = 'Press <kbd>?</kbd> for keyboard shortcuts';
+      tip.title = 'Show the edit-mode keyboard shortcuts';
+      tip.onclick = toggleShortcutHelp;
+      row.append(tip);
     }
     stave.append(row);
   });
@@ -808,7 +831,7 @@ async function auditionNote(n){
   if(!n || n.isRest) return;
   try{
     await Tone.start(); initAudio();
-    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || DEFAULT_BPM);
     instrument().triggerAttackRelease(n.name, Math.min(0.9, Math.max(0.25, (n.durBeat || 1) * spb)));
   }catch(_){}
 }
@@ -999,6 +1022,28 @@ async function exportAllPng(btn){
   btn.innerHTML = orig; btn.disabled = false;
 }
 
+// A uniform header for per-part image exports: "Piece (Part) · Key", so a shared
+// picture carries all three. Falls back to just the part when there's no piece
+// name, and drops the key clause when no key is set.
+function exportCaption(track){
+  const key = currentKeyName(), part = track.label || 'Voice';
+  const head = pieceName ? `${pieceName} (${part})` : part;
+  return `${head}${key ? '  ·  ' + key : ''}`;
+}
+// Return a new canvas with `text` in a caption band above `src` (a 2x export canvas,
+// so sizes are doubled to match). Used to caption the engraved-staff PNG.
+function withCaption(src, text){
+  const S = 2, band = 40;
+  const cv = document.createElement('canvas');
+  cv.width = src.width; cv.height = src.height + band*S;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
+  g.fillStyle = '#211c16'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.font = `600 ${18*S}px Fraunces, Georgia, serif`;
+  g.fillText(text, 16*S, 27*S);
+  g.drawImage(src, 0, band*S);
+  return cv;
+}
 // Render one part's solfège (+ note names) to a PNG on a canvas. `dest`: undefined
 // asks via the picker; a directory handle or 'download' comes from export-all.
 // Returns a promise so the bulk loop can await each file.
@@ -1006,12 +1051,14 @@ function exportTrackPng(track, dest){
   const notes = track.notes;
   const cw=64, ch=82, padX=18, padTop=44, padBot=18, perRow=Math.min(Math.max(notes.length,1), 16);
   const rows = Math.ceil(notes.length / perRow) || 1;
-  const W = padX*2 + perRow*cw, H = padTop + rows*ch + padBot;
+  const caption = exportCaption(track);
+  const meas = document.createElement('canvas').getContext('2d'); meas.font = '600 18px Fraunces, Georgia, serif';
+  const W = Math.max(padX*2 + perRow*cw, Math.ceil(meas.measureText(caption).width) + padX*2), H = padTop + rows*ch + padBot;
   const cv = document.createElement('canvas'); cv.width=W; cv.height=H;
   const g = cv.getContext('2d');
   g.fillStyle='#f4efe6'; g.fillRect(0,0,W,H);
   g.fillStyle='#211c16'; g.textAlign='left'; g.font='600 18px Fraunces, Georgia, serif';
-  g.fillText(`${track.label} (${currentKeyName()})`, padX, 26);
+  g.fillText(caption, padX, 26);
   g.textAlign='center';
   notes.forEach((n,i)=>{
     const x = padX + (i % perRow)*cw + cw/2, y = padTop + Math.floor(i/perRow)*ch;
@@ -1053,11 +1100,12 @@ async function exportTrackSheetPng(track, dest){
   box.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px;background:#fff';
   document.body.appendChild(box);
   try{
-    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:true}));
+    const inst = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, OSMD_OPTS({drawTitle:false}));
     await inst.load(partXML(track));
     if(partFromOriginal(track) && transposeOffset) applyTransposeTo(inst);   // serializer already carries the transpose
     inst.render();
-    const cv = await scoreToCanvas([...box.querySelectorAll('svg')], 2);
+    const staff = await scoreToCanvas([...box.querySelectorAll('svg')], 2);
+    const cv = withCaption(staff, exportCaption(track));   // piece + part + key header (OSMD alone omits the part name)
     const blob = await new Promise(r=> cv.toBlob(r, 'image/png'));
     await deliver(blob, safeName(exportBase(track)) + '.png', dest, {desc:'PNG image', mime:'image/png', ext:['.png']});
   }catch(e){ alert('Sheet PNG export failed: ' + e.message); }
@@ -1285,7 +1333,7 @@ async function recordVideoOffline(parts, dims, baseName, target, btn, sheet){
   const orig = btn ? btn.innerHTML : '';
   if(btn){ btn.disabled = true; btn.textContent = 'Rendering audio...'; }
   try{
-    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || DEFAULT_BPM);
     const ab = (await renderTracksToBuffer(parts)).get();
     const fps = VIDEO_FPS, totalSec = ab.duration, totalFrames = Math.max(1, Math.ceil(totalSec * fps));
     const { Muxer, ArrayBufferTarget } = window.Mp4Muxer;
@@ -1334,7 +1382,7 @@ async function recordVideoRealtime(parts, dims, baseName, mime, target, btn, she
   if(btn){ btn.disabled = true; btn.textContent = 'Rendering audio...'; }
   let actx = null;
   try{
-    const spb = 60 / (parseInt(document.getElementById('bpm').value) || 84);
+    const spb = 60 / (parseInt(document.getElementById('bpm').value) || DEFAULT_BPM);
     const ab = (await renderTracksToBuffer(parts)).get();
     actx = new (window.AudioContext || window.webkitAudioContext)();
     const buf = actx.createBuffer(ab.numberOfChannels, ab.length, ab.sampleRate);
@@ -1465,11 +1513,50 @@ function pitchXML(n){
   return `<pitch><step>${n.step}</step>${alt}<octave>${n.oct}</octave></pitch>`;
 }
 
+// How many beams (flags) a note value carries: eighth 1, 16th 2, 32nd 3.
+const BEAMS_BY_TYPE = {eighth:1, '16th':2, '32nd':3};
+// Attach <beam> markings to a measure's note descriptors. Beamable notes (eighth
+// or shorter, non-rest) are grouped so each beam sits inside one beat and never
+// crosses a beat line; a rest or a quarter-or-longer note ends the run. Within a
+// group the primary beam runs begin/continue/end; each secondary level connects
+// only the notes that share it, and an isolated shorter note (e.g. the 16th of a
+// dotted-eighth+16th pair) gets a fractional "hook" pointing back toward its beat.
+function beamMeasure(list, measureStart, beatTicks){
+  const beatOf = (d)=> Math.floor((d.start - measureStart) / beatTicks);
+  let i = 0;
+  while(i < list.length){
+    if(list[i].rest || list[i].beams < 1){ i++; continue; }
+    const beat = beatOf(list[i]);
+    let j = i;
+    while(j < list.length && !list[j].rest && list[j].beams >= 1 && beatOf(list[j]) === beat) j++;
+    const group = list.slice(i, j);
+    if(group.length >= 2){
+      const k = group.length;
+      group.forEach((d,idx)=>{
+        let bx = '';
+        for(let L=1; L <= d.beams; L++){
+          const hasPrev = idx > 0   && group[idx-1].beams >= L;
+          const hasNext = idx < k-1 && group[idx+1].beams >= L;
+          let val;
+          if(L === 1)                 val = idx===0 ? 'begin' : (idx===k-1 ? 'end' : 'continue');
+          else if(hasPrev && hasNext) val = 'continue';
+          else if(hasNext)            val = 'begin';
+          else if(hasPrev)            val = 'end';
+          else                        val = idx>0 ? 'backward hook' : 'forward hook';
+          bx += `<beam number="${L}">${val}</beam>`;
+        }
+        d.beam = bx;
+      });
+    }
+    i = j;
+  }
+}
+
 // One part's measures. `events` is the gap-filled, measure-padded note list.
 // totalMeasures pads this part to the score-wide length with trailing rest bars,
 // so all parts share a measure count (OSMD renders only up to the shortest part,
 // which would otherwise truncate the preview/exports to the shortest voice).
-function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures, pickupTicks){
+function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures, pickupTicks, beatTicks){
   const pk = pickupTicks || 0;   // a short first (pickup) measure of pk ticks, then full measures
   // measure index of a tick position, and the next barline at/after it, with the pickup offset
   const mIndex = (s)=> (pk && s < pk) ? 0 : (pk ? 1 : 0) + Math.floor((s - pk)/measureTicks);
@@ -1494,22 +1581,26 @@ function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures, pickupTic
   if(!total) total = measureTicks;
   if(cursor < total) seq.push({rest:true, start:cursor, ticks:total-cursor});
 
-  const measures = [];               // measures[m] = array of <note> strings
-  const put = (m, xml)=>{ (measures[m] = measures[m] || []).push(xml); };
+  // measures[m] = array of note descriptors {head, tail, start, beams, rest} so a
+  // second pass can add <beam> markings before the strings are assembled.
+  const measures = [];
+  const put = (m, d)=>{ (measures[m] = measures[m] || []).push(d); };
+  const startOfMeasure = (m)=> (m===0 ? 0 : (pk ? pk + (m-1)*measureTicks : m*measureTicks));
   seq.forEach(e=>{
     // split the event at measure boundaries
     const frags = []; let s = e.start, end = e.start + e.ticks;
     while(s < end){
       const segEnd = Math.min(end, nextBoundary(s));
-      frags.push({m:mIndex(s), ticks:segEnd - s});
+      frags.push({m:mIndex(s), start:s, ticks:segEnd - s});
       s = segEnd;
     }
     // each fragment decomposes into note values; pitched notes tie across all sub-notes
     const subs = [];
-    frags.forEach(f=> decomposeTicks(f.ticks).forEach(d=> subs.push({m:f.m, d})));
+    frags.forEach(f=>{ let off = 0; decomposeTicks(f.ticks).forEach(d=>{ subs.push({m:f.m, start:f.start+off, d}); off += d.ticks; }); });
     subs.forEach((sub,i)=>{
       if(e.rest){
-        put(sub.m, `<note><rest/><duration>${sub.d.ticks}</duration><voice>1</voice>${noteTypeXML(sub.d)}</note>`);
+        put(sub.m, {rest:true, start:sub.start, beams:0,
+          head:`<note><rest/><duration>${sub.d.ticks}</duration><voice>1</voice>${noteTypeXML(sub.d)}`, tail:'</note>'});
       } else {
         // tie across auto-split sub-notes AND across user ties (tieNext on the last sub, tiePrev on the first)
         const tieStart = (i < subs.length-1) || (i === subs.length-1 && e.tieNext);
@@ -1520,15 +1611,24 @@ function partMeasuresXML(notes, measureTicks, attrsXML, totalMeasures, pickupTic
         if(e.slurStart && i === 0) slur += '<slur number="1" type="start"/>';
         if(e.slurStop && i === subs.length-1) slur += '<slur number="1" type="stop"/>';
         const notations = (tied || slur) ? `<notations>${tied}${slur}</notations>` : '';
-        put(sub.m, `<note>${pitchXML(e)}<duration>${sub.d.ticks}</duration>${ties}<voice>1</voice>${noteTypeXML(sub.d)}${notations}</note>`);
+        put(sub.m, {rest:false, start:sub.start, beams:(BEAMS_BY_TYPE[sub.d.type] || 0),
+          head:`<note>${pitchXML(e)}<duration>${sub.d.ticks}</duration>${ties}<voice>1</voice>${noteTypeXML(sub.d)}`,
+          tail:`${notations}</note>`});
       }
     });
   });
+  // Beam eighth-and-shorter notes per beat (skipped when the user chose "Split").
+  // Explicit <beam> markings make OSMD engrave exactly these groups instead of
+  // auto-beaming in twos, which is wrong for compound meters (a 6/8 beat spans
+  // three eighths, so a dotted-quaver+semiquaver+quaver joins as one group).
+  if(showBeams && beatTicks) measures.forEach((list,m)=>{ if(list) beamMeasure(list, startOfMeasure(m), beatTicks); });
   const count = Math.max(measures.length || 1, totalMeasures || 1);
   let xml = '';
   for(let m=0; m<count; m++){
     const fillTicks = (pk && m===0) ? pk : measureTicks;   // an empty pickup bar is only pk long
-    const body = (measures[m] || [`<note><rest measure="yes"/><duration>${fillTicks}</duration><voice>1</voice></note>`]).join('');
+    const body = (measures[m] && measures[m].length)
+      ? measures[m].map(d=> d.head + (d.beam || '') + d.tail).join('')
+      : `<note><rest measure="yes"/><duration>${fillTicks}</duration><voice>1</voice></note>`;
     const implicit = (pk && m===0) ? ' implicit="yes"' : '';   // a pickup measure isn't counted/numbered as a full bar
     xml += `<measure number="${m+1}"${implicit}>${m===0 ? attrsXML : ''}${body}</measure>`;
   }
@@ -1558,6 +1658,12 @@ function tracksToMusicXML(opts){
   const list = (opts.tracks || tracks).filter(t=> t.notes && t.notes.length);
   const beats = opts.beats || 4, beatType = opts.beatType || 4;
   const measureTicks = Math.round(beats * (4/beatType) * XDIV);
+  // Beat length for beaming: compound meters (6/8, 9/8, 12/8 - numerator a
+  // multiple of 3 over an 8th-or-shorter unit) beat in dotted notes of three
+  // subdivisions; simple meters beat in the plain denominator note.
+  const denomTicks = Math.round(measureTicks / beats);
+  const compound = beatType >= 8 && beats % 3 === 0;
+  const beatTicks = compound ? denomTicks * 3 : denomTicks;
   const fifths = opts.fifths != null ? opts.fifths : currentFifths();
   const title = (opts.title != null ? opts.title : pieceName) || 'Untitled';
   const esc = s=> String(s).replace(/[<&>]/g, c=> ({'<':'&lt;','&':'&amp;','>':'&gt;'}[c]));
@@ -1578,7 +1684,7 @@ function tracksToMusicXML(opts){
     partList += `<score-part id="${id}"><part-name>${esc(t.label||('Voice '+(i+1)))}</part-name></score-part>`;
     const clef = clefXML(t);
     const attrs = `<attributes><divisions>${XDIV}</divisions><key><fifths>${fifths}</fifths></key><time><beats>${beats}</beats><beat-type>${beatType}</beat-type></time>${clef}</attributes>`;
-    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs, totalMeasures, pickupTicks)}</part>`;
+    partsXML += `<part id="${id}">${partMeasuresXML(t.notes, measureTicks, attrs, totalMeasures, pickupTicks, beatTicks)}</part>`;
   });
   return `<?xml version="1.0" encoding="UTF-8"?>\n<score-partwise version="3.1"><work><work-title>${esc(title)}</work-title></work><part-list>${partList}</part-list>${partsXML}</score-partwise>`;
 }
@@ -1960,6 +2066,7 @@ function selectChip(trackId, index, n, e){
   } else {
     multiSel = null;
     editSel = {trackId, index};
+    selAnchor = index;
     if(!isPlaying) auditionNote(n);
   }
   render();
@@ -1974,6 +2081,10 @@ function bulkApply(fn){
 }
 function bulkOct(d){ bulkApply(n=>{ if(!n.isRest) n.oct = Math.max(0, Math.min(9, (n.oct||5) + d)); }); }
 function bulkNudge(steps){ bulkApply(n=> nudgePitch(n, steps)); }
+// Accidentals over the whole selection: nudge each toward sharp/flat (clamped to
+// double), or set them all to one accidental (natural/♯/♭/𝄪/𝄫). Rests are skipped.
+function bulkAcc(d){ bulkApply(n=>{ if(!n.isRest) n.alter = Math.max(-2, Math.min(2, (n.alter||0) + d)); }); }
+function bulkSetAcc(v){ bulkApply(n=>{ if(!n.isRest) n.alter = v; }); }
 function bulkDur(v){ bulkApply(n=>{ n.durBeat = v; }); }
 function bulkRest(makeRest){ bulkApply(n=>{ if(makeRest) n.isRest = true; else { n.isRest = false; n.step = n.step||'C'; n.alter = n.alter||0; n.oct = n.oct||5; } }); }
 function bulkDelete(){
@@ -2006,6 +2117,77 @@ function pasteAfterSelection(){
 function refreshPasteButtons(){
   const has = !!(noteClip && noteClip.length);
   document.querySelectorAll('.nePaste').forEach(b=>{ b.disabled = !has; b.title = has ? ('Paste ' + noteClip.length + ' note(s) after this one') : 'Nothing copied yet'; });
+}
+
+// ---- keyboard editing helpers (see the keydown handler / the ? cheat-sheet) ----
+const clampIdx = (i, len)=> Math.max(0, Math.min(len - 1, i));
+// Move the single-note selection one note left/right (dir -1/+1), auditioning it.
+function moveSelection(dir){
+  const t = selectedTrack(); if(!t || !editSel || !t.notes.length) return;
+  const i = clampIdx(editSel.index + dir, t.notes.length);
+  multiSel = null; selAnchor = i; editSel = {trackId:t.id, index:i};
+  if(!isPlaying) auditionNote(t.notes[i]);
+  render();
+}
+// Grow/shrink a range selection by one note, anchored where the selection began.
+function extendSelection(dir){
+  const t = selectedTrack(); if(!t || !editSel || !t.notes.length) return;
+  if(selAnchor == null) selAnchor = editSel.index;
+  const cursor = clampIdx(editSel.index + dir, t.notes.length);
+  const lo = Math.min(selAnchor, cursor), hi = Math.max(selAnchor, cursor);
+  const set = new Set(); for(let k=lo;k<=hi;k++) set.add(k);
+  multiSel = set.size > 1 ? {trackId:t.id, set} : null;
+  editSel = {trackId:t.id, index:cursor};
+  if(!isPlaying) auditionNote(t.notes[cursor]);
+  render();
+}
+// Number-row durations (1..5) + Period toggles the dot, MuseScore-style.
+const DUR_KEYS = {Digit1:4, Digit2:2, Digit3:1, Digit4:0.5, Digit5:0.25};
+const DOTTED_VALS = new Set([3, 1.5, 0.75]);   // dotted values available in EDIT_DURS
+function bulkToggleDot(){
+  bulkApply(n=>{
+    if(DOTTED_VALS.has(n.durBeat)) n.durBeat = n.durBeat / 1.5;              // un-dot
+    else if(EDIT_DUR_VALS.includes(n.durBeat * 1.5)) n.durBeat = n.durBeat * 1.5;   // add a dot when the result is a real value
+  });
+}
+// Toggle rest/note across the selection, following the anchor note's current state.
+function bulkToggleRest(){ const a = selectedNote(); bulkRest(!(a && a.isRest)); }
+// Insert a fresh note right after the selection (copying the anchor) and select it,
+// so Enter chains note entry.
+function insertAfterSelection(){
+  const t = selectedTrack(); if(!t || !editSel) return;
+  pushUndo();
+  const at = (multiSel ? Math.max(...multiSel.set) : editSel.index) + 1;
+  t.notes.splice(at, 0, defaultNote(t.notes[at-1]));
+  multiSel = null; editSel = {trackId:t.id, index:at}; selAnchor = at;
+  afterEdit();
+}
+// The rows shown in the ? cheat-sheet overlay: [keys, action].
+const SHORTCUT_ROWS = [
+  ['←  /  →', 'Move selection (Shift: extend the range)'],
+  ['↑  /  ↓', 'Pitch up/down a step (Shift: by an octave)'],
+  ['=  /  −', 'Sharpen / flatten  ·  0 or N: natural'],
+  ['1 … 5', 'Whole · half · quarter · eighth · 16th'],
+  ['.', 'Toggle dotted'],
+  ['R', 'Toggle rest  ·  T: tie  ·  S: slur'],
+  ['Enter', 'Insert a note after the selection'],
+  ['⌘/Ctrl C · V', 'Copy · paste  ·  ⌘/Ctrl Z: undo'],
+  ['⌫  /  Del', 'Delete selection'],
+  ['Space', 'Play / pause (← / → seek when not editing)'],
+];
+// Toggle the keyboard cheat-sheet overlay (opened with ?, closed with ? or Esc).
+function toggleShortcutHelp(){
+  const open = document.getElementById('kbdhelp');
+  if(open){ open.remove(); return; }
+  const el = document.createElement('div'); el.id = 'kbdhelp';
+  const rows = SHORTCUT_ROWS.map(([k,a])=> `<tr><td><kbd>${k}</kbd></td><td>${a}</td></tr>`).join('');
+  el.innerHTML = `<div class="kbdcard" role="dialog" aria-label="Keyboard shortcuts">
+    <h3>Edit-mode shortcuts</h3>
+    <table>${rows}</table>
+    <p class="hint">Press <kbd>?</kbd> or <kbd>Esc</kbd> to close</p>
+  </div>`;
+  el.addEventListener('click', ev=>{ if(ev.target === el) el.remove(); });   // click the backdrop to dismiss
+  document.body.appendChild(el);
 }
 
 // ---- phrasing: slurs (arc over different pitches) + ties (sustain same pitch) ----
@@ -2143,6 +2325,11 @@ function renderBulkBar(panel, t, count){
       <button class="minibtn" id="blOctDn">oct −</button>
       <button class="minibtn" id="blOctUp">oct +</button>
     </div>
+    <div class="grp"><label>Accidental</label>
+      <button class="minibtn" id="blAccDn" title="More flat">&lt;</button>
+      <select id="blAcc"><option value="">Set…</option>${ACCIDENTALS.map(([v,s])=> `<option value="${v}">${s}</option>`).join('')}</select>
+      <button class="minibtn" id="blAccUp" title="More sharp">&gt;</button>
+    </div>
     <div class="grp"><label>Set</label><select id="blDur">${durOpts}</select></div>
     <button class="minibtn" id="blRest">Make rest</button>
     <div class="grp"><label>Phrasing</label>
@@ -2158,6 +2345,9 @@ function renderBulkBar(panel, t, count){
   panel.querySelector('#blPitchDn').onclick = ()=> bulkNudge(-1);
   panel.querySelector('#blOctUp').onclick = ()=> bulkOct(1);
   panel.querySelector('#blOctDn').onclick = ()=> bulkOct(-1);
+  panel.querySelector('#blAccDn').onclick = ()=> bulkAcc(-1);
+  panel.querySelector('#blAccUp').onclick = ()=> bulkAcc(1);
+  panel.querySelector('#blAcc').onchange = e=>{ if(e.target.value !== '') bulkSetAcc(parseInt(e.target.value)); };
   panel.querySelector('#blDur').onchange = e=>{ if(e.target.value) bulkDur(parseFloat(e.target.value)); };
   panel.querySelector('#blRest').onclick = ()=> bulkRest(true);
   panel.querySelector('#blSlur').onclick = toggleSlur;
@@ -2203,14 +2393,13 @@ function startPiece(partsSpec){
   exitReview();
   pushUndo();
   pieceName = ''; lastXML = ''; transposeOffset = 0; homeOffset = 0; pickupBeats = 0; edited = true;
-  meterBeats = 4; meterType = 4; setKey(0, 'C');   // sensible defaults: C major, 4/4
+  meterBeats = 4; meterType = 4; setKey(0, 'C'); setTempo(DEFAULT_BPM);   // sensible defaults: C major, 4/4, moderate tempo
   tracks = partsSpec.map((s,i)=> ({id:'t'+i, label:s.label, enabled:true, solo:false, vol:1, clef:s.clef || null, notes:[ s.note || defaultNote(null) ]}));
   soloActive = false; editSel = {trackId:'t0', index:0};
   tracks[0].editing = true;   // open the first part's inline editor so you can start typing notes
   afterEdit();
   switchTab('player');
-  openEditTools();            // reveal Title/timesig/Add part etc. for the new piece
-  const tEl = document.getElementById('edTitle'); if(tEl){ tEl.value = ''; tEl.focus(); }
+  const tEl = document.getElementById('edTitle'); if(tEl){ tEl.value = ''; tEl.focus(); }   // Title lives in the always-open tools panel
 }
 function newPiece(){ startPiece([{label:'Voice 1'}]); }
 // One-click SATB: four empty voices at sensible starting octaves.
@@ -2232,7 +2421,7 @@ function sessionState(){
   return {
     v: 1, tracks, meterBeats, meterType, pieceName, transposeOffset, homeOffset, pickupBeats,
     tonicPc: currentTonic.pc, tonicLetter: currentTonic.letter,
-    bpm: parseInt(document.getElementById('bpm').value) || 84,
+    bpm: parseInt(document.getElementById('bpm').value) || DEFAULT_BPM,
     showDynamics, showBeams,
   };
 }
@@ -2285,23 +2474,8 @@ function playerVisible(){ const v = document.getElementById('view-player'); retu
 function switchTab(view){
   document.querySelectorAll('#tabs .tab').forEach(x=> x.classList.toggle('on', x.dataset.view === view));
   document.querySelectorAll('.view').forEach(s=> s.hidden = (s.id !== 'view-' + view));
-  syncEditTools(view);
   if(view === 'player') render();   // now visible: engrave any per-part sheets that were deferred while hidden
 }
-
-// The piece tools toolbar (title/timesig/new/add/undo/save) is revealed by the
-// Player's "Tools" toggle; hidden on the Full score tab.
-let editToolsOpen = false;
-function syncEditTools(view){
-  const tools = document.getElementById('edtools');
-  const toggle = document.getElementById('edToolsToggle');
-  if(!tools) return;
-  if(view === 'player'){ tools.hidden = !editToolsOpen; if(toggle){ toggle.hidden = false; toggle.classList.toggle('on', editToolsOpen); } }
-  else { tools.hidden = true; if(toggle) toggle.hidden = true; }
-}
-function toggleEditTools(){ editToolsOpen = !editToolsOpen; syncEditTools('player'); }
-// Open the tools toolbar in the player (used after New piece so you can name it).
-function openEditTools(){ editToolsOpen = true; syncEditTools('player'); }
 
 // Phase 5: after OMR, land in the editor with a "check me" banner before the player.
 // Phase 5: after OMR, review/fix in the PLAYER (where you see + hear each part)
@@ -2394,7 +2568,6 @@ function selectNoteByBeat(t, beat, e){
 document.getElementById('stave').addEventListener('click', seekFromSheetClick);
 document.getElementById('sheet').addEventListener('click', seekFromSheetClick);
 // Editor controls
-document.getElementById('edToolsToggle').addEventListener('click', toggleEditTools);
 document.getElementById('edNew').addEventListener('click', newPiece);
 document.getElementById('edSATB').addEventListener('click', newSATB);
 document.getElementById('edAddPart').addEventListener('click', addPart);
@@ -2421,14 +2594,30 @@ document.getElementById('bpm').addEventListener('input', e=>{
 document.addEventListener('keydown', e=>{
   const tag = (e.target.tagName || '').toLowerCase();
   if(tag==='textarea' || tag==='input' || tag==='select' || e.target.isContentEditable) return;
+  if(e.key === '?'){ e.preventDefault(); toggleShortcutHelp(); return; }           // discoverable cheat-sheet
+  if(e.code === 'Escape'){ const h = document.getElementById('kbdhelp'); if(h){ e.preventDefault(); h.remove(); return; } }
   if((e.metaKey || e.ctrlKey) && e.code==='KeyZ'){ e.preventDefault(); undo(); return; }
   const selTrack = selectedTrack(), editing = selTrack && selTrack.editing && editSel;
-  // Editing shortcuts on the selection (single note or a multi-selection):
+  // Editing shortcuts on the selection (single note or a multi-selection). While
+  // editing, ←/→ move the selection; when NOT editing they seek the transport.
   if(editing){
-    if(e.code==='ArrowUp' || e.code==='ArrowDown'){ e.preventDefault(); bulkNudge(e.code==='ArrowUp' ? 1 : -1); return; }
-    if((e.metaKey || e.ctrlKey) && e.code==='KeyC'){ e.preventDefault(); copySelection(); return; }
-    if((e.metaKey || e.ctrlKey) && e.code==='KeyV'){ e.preventDefault(); pasteAfterSelection(); return; }
-    if(e.code==='Backspace' || e.code==='Delete'){ e.preventDefault(); bulkDelete(); return; }
+    const c = e.code, shift = e.shiftKey, cmd = e.metaKey || e.ctrlKey;
+    if(c==='ArrowUp' || c==='ArrowDown'){ e.preventDefault(); const d = c==='ArrowUp'?1:-1; if(shift) bulkOct(d); else bulkNudge(d); return; }
+    if(c==='ArrowLeft' || c==='ArrowRight'){ e.preventDefault(); const d = c==='ArrowRight'?1:-1; if(shift) extendSelection(d); else moveSelection(d); return; }
+    if(cmd && c==='KeyC'){ e.preventDefault(); copySelection(); return; }
+    if(cmd && c==='KeyV'){ e.preventDefault(); pasteAfterSelection(); return; }
+    if(c==='Backspace' || c==='Delete'){ e.preventDefault(); bulkDelete(); return; }
+    if(!cmd && !e.altKey){   // bare-key shortcuts (leave ⌘/Ctrl/Alt combos for the browser)
+      if(c==='Equal'){ e.preventDefault(); bulkAcc(1); return; }         // = carries "+" -> sharpen
+      if(c==='Minus'){ e.preventDefault(); bulkAcc(-1); return; }        // - -> flatten
+      if(c==='Digit0' || c==='KeyN'){ e.preventDefault(); bulkSetAcc(0); return; }   // natural
+      if(DUR_KEYS[c] != null){ e.preventDefault(); bulkDur(DUR_KEYS[c]); return; }   // 1..5 durations
+      if(c==='Period'){ e.preventDefault(); bulkToggleDot(); return; }
+      if(c==='KeyR'){ e.preventDefault(); bulkToggleRest(); return; }
+      if(c==='KeyT'){ e.preventDefault(); if(multiSel) toggleTie(); else toggleTieNext(); return; }
+      if(c==='KeyS'){ e.preventDefault(); toggleSlur(); return; }
+      if(c==='Enter'){ e.preventDefault(); insertAfterSelection(); return; }
+    }
   }
   if(e.code==='Space'){ e.preventDefault(); togglePlay(); }
   else if(e.code==='ArrowRight'){ e.preventDefault(); step(1); }
@@ -2474,6 +2663,7 @@ document.querySelectorAll('#vowel button').forEach(b=>b.addEventListener('click'
 }));
 // Paste a screenshot anywhere (⌘V) -> transcribe it via the local backend.
 document.addEventListener('paste', e=>{
+  if(!omrAvailable) return;                 // no backend -> leave paste alone
   const items = e.clipboardData && e.clipboardData.items;
   if(!items) return;
   for(const it of items){
@@ -2503,3 +2693,6 @@ document.querySelectorAll('[data-icon]').forEach(el=> el.insertAdjacentHTML('aft
 
 // Restore the last working piece if there is one; otherwise the default melody.
 if(!restoreSession()) buildManual();
+
+// Reveal the photo-OMR UI only if its backend is actually reachable.
+checkOmrBackend();

@@ -24,6 +24,53 @@
   </header>
 
   <div class="panel">
+    <label>Load a hymn</label>
+    <p class="hint">Most hymns already exist as clean notation. Download a <code>.musicxml</code>, <code>.mxl</code>, or <code>.mid</code> file and load it here: best quality, instant, full SATB voices, no scanning.</p>
+    <div class="upload">
+      <input type="file" id="musicfile" accept=".musicxml,.xml,.mxl,.mid,.midi">
+      <button class="ghost" id="loadfilebtn">Load file</button>
+      <span class="hint" id="filemsg"></span>
+    </div>
+    <p class="hint">Free sources: <a href="https://www.cpdl.org" target="_blank" rel="noopener">CPDL</a> (choral) · <a href="https://hymnary.org" target="_blank" rel="noopener">Hymnary</a> · <a href="https://musescore.com" target="_blank" rel="noopener">MuseScore</a></p>
+
+    <details>
+      <summary>Type a melody by hand</summary>
+      <textarea id="notes">C4 D4 E4 F4 G4 A4 B4 C5</textarea>
+      <p class="hint">One note per token: letter + optional <code>#</code>/<code>b</code> + octave, e.g. <code>C4</code>, <code>F#5</code>, <code>Bb3</code>. Add a duration with a colon (<code>4</code>=quarter, <code>8</code>=eighth, <code>2</code>=half): <code>G4:8</code>. Use <code>R</code> for a rest. Click <b>Re-parse</b> to load it (this replaces the current piece with a single melody).</p>
+      <div class="row">
+        <button class="ghost" data-ex="C4 D4 E4 F4 G4 A4 B4 C5" data-k="0">Major scale (C)</button>
+        <button class="ghost" data-ex="C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2" data-k="0">Twinkle (C)</button>
+        <button class="ghost" data-ex="E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4:2 D4 D4:2" data-k="0">Ode to Joy (C)</button>
+        <button class="ghost" data-ex="A4 C#5 E5 A4 C#5 E5 F#5 E5 D5 C#5 B4 A4" data-k="9">Arpeggio (A)</button>
+        <button class="ghost" id="parsebtn">Re-parse</button>
+      </div>
+    </details>
+
+    <details>
+      <summary>Paste MusicXML</summary>
+      <p class="hint">Paste the contents of a <code>.musicxml</code> / <code>.xml</code> file. All voices and staves are parsed (Soprano/Alto/Tenor/Bass).</p>
+      <textarea id="xml" placeholder="<score-partwise> ... </score-partwise>" style="min-height:90px"></textarea>
+      <div class="row"><button class="ghost" id="xmlbtn">Load MusicXML</button><span class="hint" id="xmlmsg"></span></div>
+    </details>
+
+    <details id="omrpanel" hidden>
+      <summary>Transcribe a photo (local OMR)</summary>
+      <p class="hint">For sheet music you can't find as a file. Choose an image <b>or paste a screenshot anywhere with ⌘V</b>. Needs the local backend running. See <code>backend/README.md</code> (<code>uvicorn main:app --port 8000</code>). OMR is imperfect on dense SATB, so always check the result.</p>
+      <div class="upload">
+        <input type="file" id="photo" accept="image/*,.pdf">
+        <button class="ghost" id="photobtn">Transcribe</button>
+        <span class="hint" id="photomsg"></span>
+      </div>
+    </details>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-view="player">Player</button>
+    <button class="tab" data-view="score">Full score</button>
+  </nav>
+
+  <!-- Playback settings + piece-level tools, always shown below the tabs. -->
+  <div id="edtools" class="panel toolspanel">
     <div class="ctrls">
       <div class="field">
         <label for="key">Key (movable do)</label>
@@ -59,72 +106,24 @@
       </div>
     </div>
     <p class="hint" id="timbremsg"></p>
-  </div>
-
-  <div class="panel">
-    <label>Load a hymn</label>
-    <p class="hint">Most hymns already exist as clean notation. Download a <code>.musicxml</code>, <code>.mxl</code>, or <code>.mid</code> file and load it here: best quality, instant, full SATB voices, no scanning.</p>
-    <div class="upload">
-      <input type="file" id="musicfile" accept=".musicxml,.xml,.mxl,.mid,.midi">
-      <button class="ghost" id="loadfilebtn">Load file</button>
-      <span class="hint" id="filemsg"></span>
+    <div class="editbar">
+      <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" placeholder="Untitled"></div>
+      <div class="field"><label>Time signature</label>
+        <div class="seg timesig">
+          <select id="edBeats"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select>
+          <span>/</span>
+          <select id="edBeatType"><option>2</option><option selected>4</option><option>8</option><option>16</option></select>
+        </div>
+      </div>
+      <button class="ghost" id="edNew" data-icon="file-plus">New piece</button>
+      <button class="ghost" id="edSATB" data-icon="file-plus">New SATB</button>
+      <button class="ghost" id="edAddPart" data-icon="plus">Add part</button>
+      <button class="ghost" id="edUndo" title="Undo (Cmd/Ctrl+Z)">Undo</button>
+      <button class="ghost" id="edSaveProj" data-icon="download">Save project</button>
+      <button class="ghost" id="edOpenProj">Open project</button>
+      <input type="file" id="projfile" accept=".json,.solfege.json" hidden>
+      <span class="hint" id="editmsg">Click a note to edit and hear it. Changes apply live; the playback bar at the bottom plays the whole piece on any tab.</span>
     </div>
-    <p class="hint">Free sources: <a href="https://www.cpdl.org" target="_blank" rel="noopener">CPDL</a> (choral) · <a href="https://hymnary.org" target="_blank" rel="noopener">Hymnary</a> · <a href="https://musescore.com" target="_blank" rel="noopener">MuseScore</a></p>
-
-    <details>
-      <summary>Type a melody by hand</summary>
-      <textarea id="notes">C4 D4 E4 F4 G4 A4 B4 C5</textarea>
-      <p class="hint">One note per token: letter + optional <code>#</code>/<code>b</code> + octave, e.g. <code>C4</code>, <code>F#5</code>, <code>Bb3</code>. Add a duration with a colon (<code>4</code>=quarter, <code>8</code>=eighth, <code>2</code>=half): <code>G4:8</code>. Use <code>R</code> for a rest. Click <b>Re-parse</b> to load it (this replaces the current piece with a single melody).</p>
-      <div class="row">
-        <button class="ghost" data-ex="C4 D4 E4 F4 G4 A4 B4 C5" data-k="0">Major scale (C)</button>
-        <button class="ghost" data-ex="C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2" data-k="0">Twinkle (C)</button>
-        <button class="ghost" data-ex="E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4:2 D4 D4:2" data-k="0">Ode to Joy (C)</button>
-        <button class="ghost" data-ex="A4 C#5 E5 A4 C#5 E5 F#5 E5 D5 C#5 B4 A4" data-k="9">Arpeggio (A)</button>
-        <button class="ghost" id="parsebtn">Re-parse</button>
-      </div>
-    </details>
-
-    <details>
-      <summary>Paste MusicXML</summary>
-      <p class="hint">Paste the contents of a <code>.musicxml</code> / <code>.xml</code> file. All voices and staves are parsed (Soprano/Alto/Tenor/Bass).</p>
-      <textarea id="xml" placeholder="<score-partwise> ... </score-partwise>" style="min-height:90px"></textarea>
-      <div class="row"><button class="ghost" id="xmlbtn">Load MusicXML</button><span class="hint" id="xmlmsg"></span></div>
-    </details>
-
-    <details>
-      <summary>Transcribe a photo (local OMR)</summary>
-      <p class="hint">For sheet music you can't find as a file. Choose an image <b>or paste a screenshot anywhere with ⌘V</b>. Needs the local backend running. See <code>backend/README.md</code> (<code>uvicorn main:app --port 8000</code>). OMR is imperfect on dense SATB, so always check the result.</p>
-      <div class="upload">
-        <input type="file" id="photo" accept="image/*,.pdf">
-        <button class="ghost" id="photobtn">Transcribe</button>
-        <span class="hint" id="photomsg"></span>
-      </div>
-    </details>
-  </div>
-
-  <nav class="tabs" id="tabs">
-    <button class="tab on" data-view="player">Player</button>
-    <button class="tab" data-view="score">Full score</button>
-  </nav>
-
-  <!-- Piece-level tools, revealed by the Player's "Tools" toggle. -->
-  <div id="edtools" class="editbar" hidden>
-    <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" placeholder="Untitled"></div>
-    <div class="field"><label>Time signature</label>
-      <div class="seg timesig">
-        <select id="edBeats"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select>
-        <span>/</span>
-        <select id="edBeatType"><option>2</option><option selected>4</option><option>8</option><option>16</option></select>
-      </div>
-    </div>
-    <button class="ghost" id="edNew" data-icon="file-plus">New piece</button>
-    <button class="ghost" id="edSATB" data-icon="file-plus">New SATB</button>
-    <button class="ghost" id="edAddPart" data-icon="plus">Add part</button>
-    <button class="ghost" id="edUndo" title="Undo (Cmd/Ctrl+Z)">Undo</button>
-    <button class="ghost" id="edSaveProj" data-icon="download">Save project</button>
-    <button class="ghost" id="edOpenProj">Open project</button>
-    <input type="file" id="projfile" accept=".json,.solfege.json" hidden>
-    <span class="hint" id="editmsg">Click a note to edit and hear it. Changes apply live; the playback bar at the bottom plays the whole piece on any tab.</span>
   </div>
 
   <!-- OMR review banner. Shown in the Player after a transcription so you check/fix
@@ -162,7 +161,6 @@
           </div>
         </div>
         <div class="exportall">
-          <button class="ghost" id="edToolsToggle" data-icon="wrench" title="Piece tools: title, time signature, new piece, add part, undo, save/open">Tools</button>
           <button class="ghost" id="allmp3" data-icon="download">All parts as MP3</button>
           <button class="ghost" id="mixmp3" data-icon="download">Full mix (MP3)</button>
           <button class="ghost" id="allpng" data-icon="download">All parts as PNG</button>
@@ -170,7 +168,7 @@
           <button class="ghost" id="mixvid" data-icon="film">Full mix (video)</button>
         </div>
       </div>
-      <p class="hint">Each part shows movable-do solfège or its own engraved staff, drawn from your notes. Toggle one part, or all at once above. Hit <b>Edit</b> on a part to fix its notes, or <b>Tools</b> to start or add parts.</p>
+      <p class="hint">Each part shows movable-do solfège or its own engraved staff, drawn from your notes. Toggle one part, or all at once above. Hit <b>Edit</b> on a part to fix its notes; the <b>tools</b> panel above starts or adds parts.</p>
       <div class="stave" id="stave"></div>
     </div>
   </section>
