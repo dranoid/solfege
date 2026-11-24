@@ -1949,3 +1949,40 @@ test('pickup persists in the project and round-trips', async ({ page }) => {
   await page.evaluate((s) => { pickupBeats = 0; restoreState(s); }, st);
   expect(await page.evaluate(() => pickupBeats)).toBe(1);
 });
+
+// A one-part MusicXML whose first measure holds `firstBeats` quarter notes, then one
+// full 4/4 bar. `implicit` adds implicit="yes" to the first measure, as notation
+// programs do for a pickup (anacrusis).
+function pickupXML(firstBeats, implicit) {
+  const q = '<note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><type>quarter</type></note>';
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Melody</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="${implicit ? 0 : 1}"${implicit ? ' implicit="yes"' : ''}>
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      ${q.repeat(firstBeats)}
+    </measure>
+    <measure number="${implicit ? 1 : 2}">${q.repeat(4)}</measure>
+  </part>
+</score-partwise>`;
+}
+
+test('pickup: a MusicXML import marked implicit sets the lead-in, so barlines fall after it', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, null), pickupXML(1, true));
+  expect(await page.evaluate(() => pickupBeats)).toBe(1);
+  const v = page.locator('.voice').first();
+  expect(await v.locator('.barline').count()).toBe(1);   // after the pickup note (the final one is omitted)
+  await expect(v.locator('.barwarn')).toHaveCount(0);    // 1 + 4 beats = whole bars once the pickup is known
+});
+
+test('pickup: a short first measure without the implicit mark is also read as a lead-in', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, null), pickupXML(1, false));
+  expect(await page.evaluate(() => pickupBeats)).toBe(1);
+});
+
+test('pickup: a full first measure imports with no lead-in, clearing an earlier one', async ({ page }) => {
+  await page.evaluate((x) => loadMusicXMLText(x, null), pickupXML(1, true));
+  await page.evaluate((x) => loadMusicXMLText(x, null), pickupXML(4, false));
+  expect(await page.evaluate(() => pickupBeats)).toBe(0);
+});

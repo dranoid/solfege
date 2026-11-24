@@ -149,14 +149,16 @@ function suspectParts(){
   return tracks.filter(t=> pitchedCount(t) <= 2);
 }
 
-function parseParts(doc){
+// `info` (optional) receives firstMeasureBeats: the length in quarter beats of the
+// longest part's first measure, so the loader can recognise a pickup (anacrusis).
+function parseParts(doc, info){
   const parts = [...doc.querySelectorAll('part')];
   const map = new Map();
-  let lastDiv = 1;
+  let lastDiv = 1, firstMeasureBeats = 0;
   parts.forEach((part, pi)=>{
     let divisions = lastDiv, measureStart = 0;
     const clefByStaff = {};   // staff number -> clef name, so each voice keeps its written clef
-    [...part.querySelectorAll('measure')].forEach(measure=>{
+    [...part.querySelectorAll('measure')].forEach((measure, mi)=>{
       const d = measure.querySelector('attributes divisions');
       if(d) divisions = parseInt(d.textContent) || divisions;
       [...measure.querySelectorAll(':scope > attributes > clef')].forEach(cl=>{
@@ -199,10 +201,12 @@ function parseParts(doc){
           measureLen = Math.max(measureLen, cursor);
         }
       });
+      if(mi === 0) firstMeasureBeats = Math.max(firstMeasureBeats, measureLen/divisions);
       measureStart += measureLen/divisions;
     });
     lastDiv = divisions;
   });
+  if(info) info.firstMeasureBeats = firstMeasureBeats;
   return labelTracks([...map.values()].filter(t=>t.cnt > 0));
 }
 
@@ -241,8 +245,13 @@ function loadMusicXMLText(txt, msgEl){
     const tb = parseInt(doc.querySelector('time beats')?.textContent), tt = parseInt(doc.querySelector('time beat-type')?.textContent);
     meterBeats = tb > 0 ? tb : 4; meterType = tt > 0 ? tt : 4;   // piece meter for the serializer
     const tempo = readTempo(doc); const setT = tempo ? setTempo(tempo) : null;
-    const built = parseParts(doc);
+    const info = {};
+    const built = parseParts(doc, info);
     if(!built.length) throw new Error('no notes found');
+    // A first measure shorter than a full bar is a pickup (anacrusis): notation programs
+    // mark it implicit="yes", but some exporters omit that, so the length decides.
+    const fb = info.firstMeasureBeats;
+    if(fb > 1e-6 && fb < barBeats() - 1e-6) pickupBeats = fb;
     tracks = built; soloActive = false; render(); contentChanged();
     const total = built.reduce((s,t)=> s + t.notes.filter(n=>!n.isRest).length, 0);
     if(msgEl) msgEl.textContent = `Loaded ${built.length} voice(s), ${total} notes${setT ? `, tempo ${setT} bpm` : ''}.`;
